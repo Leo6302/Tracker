@@ -71,10 +71,10 @@ class TrackingPipeline:
         fw = fh = 1
 
         temp = VideoTracker(self.config, yolo_device=self.tracker.yolo_device)
-        for _, _, _, (fw, fh), total_frames in temp.process_video(
+        for frame_idx, _, _, (fw, fh), total_frames in temp.process_video(
             video_path, class_filter=class_filter
         ):
-            if _ >= int(total_frames * fraction):
+            if frame_idx >= int(total_frames * fraction):
                 break
 
         sequences, targets = [], []
