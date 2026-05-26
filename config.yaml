@@ -1,0 +1,12 @@
+seq_len: 20
+pred_len: 10
+conf_thresh: 0.5
+yolo_model: yolo11n.pt
+hidden_size: 256
+num_layers: 3
+dropout: 0.2
+lr: 0.001
+batch_size: 64
+pretrain_epochs: 50
+finetune_epochs: 5
+finetune_fraction: 0.3
