@@ -1,0 +1,74 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-05-26T10:38:59.517Z",
+  "phase": "04",
+  "phase_name": "research-workflow",
+  "phase_dir": ".planning/phases/04-research-workflow",
+  "plan": 4,
+  "task": "complete",
+  "total_tasks": 4,
+  "status": "paused",
+  "completed_tasks": [
+    {
+      "id": 1,
+      "name": "Phase 1 - 교통 핵심 분석 모듈",
+      "status": "done",
+      "description": "counting_line.py (가상 감지선), speed_estimator.py (픽셀→km/h), od_matrix.py (OD행렬)"
+    },
+    {
+      "id": 2,
+      "name": "Phase 2 - 도시 분석 모듈",
+      "status": "done",
+      "description": "density_heatmap.py (KDE 열지도), zone_analyzer.py (존 체류시간·점유율·피크)"
+    },
+    {
+      "id": 3,
+      "name": "Phase 3 - 통계 내보내기",
+      "status": "done",
+      "description": "stats_exporter.py (Excel+HTML), MC-Dropout 불확실성, CSV pred_std 컬럼"
+    },
+    {
+      "id": 4,
+      "name": "Phase 4 - 연구 워크플로우",
+      "status": "done",
+      "description": "calibration.py (호모그래피), session.py (JSON 세션), congestion.py (Greenshields)"
+    }
+  ],
+  "remaining_tasks": [],
+  "blockers": [],
+  "human_actions_pending": [],
+  "decisions": [
+    {
+      "decision": "Analyzer 패턴 (update/finalize) 사용",
+      "rationale": "pipeline.py의 _build_analyzers()에 등록하는 일관된 인터페이스",
+      "phase": "01"
+    },
+    {
+      "decision": "Gradio 기반 UI (11개 출력, 아코디언 패널)",
+      "rationale": "연구자가 쉽게 사용할 수 있는 인터랙티브 UI",
+      "phase": "03"
+    },
+    {
+      "decision": "openpyxl + Plotly로 Excel/HTML 이중 내보내기",
+      "rationale": "연구 환경에서 Excel 및 웹 차트 모두 필요",
+      "phase": "03"
+    }
+  ],
+  "uncommitted_files": [],
+  "next_action": "다음 개선 방향: (1) app.py UI 버그 수정 또는 새 기능 추가, (2) 새 분석 모듈 개발, (3) 모델 성능 개선",
+  "context_notes": "교통·도시·통계 연구용 4-Phase 확장 완료 상태. 모든 커밋 깔끔. 다음 세션에서 새 기능 요청이나 버그 수정 시작 가능.",
+  "project_summary": {
+    "name": "Object Tracking + LSTM Trajectory Prediction (Research Tool)",
+    "stack": ["Python", "YOLOv11", "LSTM", "Gradio", "PyTorch", "OpenCV", "openpyxl", "Plotly"],
+    "entry_point": "app.py",
+    "config": "config.yaml",
+    "model_weights": ["yolo11n.pt", "models/lstm_pretrained.pt"],
+    "key_modules": {
+      "pipeline": "src/pipeline.py",
+      "tracker": "src/tracking/tracker.py",
+      "analyzers": "src/analysis/",
+      "prediction": "src/prediction/",
+      "visualization": "src/visualization/"
+    }
+  }
+}
