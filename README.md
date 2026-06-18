@@ -477,6 +477,140 @@ _all_outputs = [
 
 ---
 
+### 11. 교통 분석 차트에 한글이 깨지고, 속도 박스플롯에 고리 아티팩트가 발생하며, 값을 정확히 읽기 어려움
+
+- **증상 1 — 한글 깨짐**: "클래스별 통과 수", "통과 수", "유량 (대/시)", "속도 (km/h)", "클래스별 속도 분포" 등 차트 제목·축 레이블에 한글이 모두 □□□ 박스 문자로 표시됨.
+- **증상 2 — 고리 아티팩트**: 속도 분포 박스플롯에서 일부 클래스(예: bus)의 박스 상단에 여러 개의 이상치(outlier) 마커가 겹쳐 쌓여 고리·도넛 모양의 시각적 잡음이 발생함.
+- **증상 3 — 제한적 정보**: 차트 위에 커서를 올려도 정확한 수치(통과 수, 유량 값, 속도 값)가 표시되지 않고 matplotlib 기본 좌표값만 나오거나 아무것도 표시되지 않음.
+- **원인**: 세 증상 모두 matplotlib 백엔드에서 정적 PNG 이미지로 렌더링하기 때문에 발생.
+  1. matplotlib은 시스템에서 한글 폰트를 자동으로 찾지 못해 박스 문자로 대체.
+  2. matplotlib `ax.boxplot`의 `flierprops` 마커들이 같은 y값 근처에 수천 개 겹치면 겹침 효과로 고리처럼 보임.
+  3. PNG 이미지는 호버 인터랙션이 없음 — `gr.Plot`이 matplotlib Figure를 PNG로 인코딩해 표시하므로 어떤 인터랙션도 불가.
+- **해결**: `_make_traffic_count_chart`와 `_make_speed_chart` 두 함수를 matplotlib → **Plotly**로 교체. `gr.Plot` 컴포넌트는 matplotlib Figure와 Plotly Figure를 모두 지원하므로 출력 위젯 타입은 변경 불필요. Plotly는 브라우저에서 렌더링하므로 한글 자동 지원, 이상치 처리 방식이 다름(개별 점), 호버 툴팁 네이티브 지원.
+
+**임포트 추가** — `app.py` 상단의 matplotlib 임포트 바로 아래에:
+
+```python
+# app.py
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+# ↓ 아래 3줄 추가
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+```
+
+**교체 함수 1 — 통과 수 · 유량 막대 차트 (Plotly 버전)**:
+
+```python
+# app.py — _make_traffic_count_chart 전체를 아래로 교체
+def _make_traffic_count_chart(counting_data):
+    """감지선별 클래스 통과 수·유량 그룹 막대 차트 (Plotly, 인터랙티브)."""
+    if not counting_data:
+        return None
+    all_cls = sorted({cls for line in counting_data for cls in line.get('counts', {})})
+    if not all_cls:
+        return None
+
+    n_lines = len(counting_data)
+    colors = px.colors.qualitative.Set1
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=['클래스별 통과 수', '클래스별 유량 (대/시)'],
+        horizontal_spacing=0.12,
+    )
+
+    for i, line in enumerate(counting_data):
+        lbl = line.get('label', f'Line {i+1}')
+        counts = [line.get('counts', {}).get(cls, 0) for cls in all_cls]
+        flows = [line.get('flow_rates_veh_hr', {}).get(cls, 0) for cls in all_cls]
+        color = colors[i % len(colors)]
+
+        fig.add_trace(go.Bar(
+            name=lbl, x=all_cls, y=counts,
+            marker_color=color, legendgroup=lbl,
+            hovertemplate='<b>%{x}</b><br>통과 수: <b>%{y}</b><extra>' + lbl + '</extra>',
+        ), row=1, col=1)
+
+        fig.add_trace(go.Bar(
+            name=lbl, x=all_cls, y=[round(v, 1) for v in flows],
+            marker_color=color, legendgroup=lbl, showlegend=False,
+            hovertemplate='<b>%{x}</b><br>유량: <b>%{y:.1f}</b> 대/시<extra>' + lbl + '</extra>',
+        ), row=1, col=2)
+
+    fig.update_layout(
+        barmode='group',
+        height=420,
+        legend_title_text='감지선',
+        yaxis_title='통과 수',
+        yaxis2_title='유량 (대/시)',
+        template='plotly_white',
+        hovermode='x unified',
+        margin=dict(t=60, b=50, l=60, r=20),
+    )
+    fig.update_xaxes(tickangle=-20)
+    return fig
+```
+
+**교체 함수 2 — 속도 분포 박스플롯 (Plotly 버전)**:
+
+```python
+# app.py — _make_speed_chart 전체를 아래로 교체
+def _make_speed_chart(speed_data):
+    """클래스별 속도 분포 박스플롯 (Plotly, 인터랙티브)."""
+    if not speed_data:
+        return None
+    track_speeds = speed_data.get('track_speeds', {})
+    track_cls = speed_data.get('track_cls', {})
+    if not track_speeds:
+        return None
+
+    by_class: dict = {}
+    for tid, speeds in track_speeds.items():
+        cls = track_cls.get(tid) or track_cls.get(str(tid), 'unknown')
+        by_class.setdefault(cls, []).extend(speeds)
+
+    labels = [cls for cls in sorted(by_class) if len(by_class[cls]) >= 2]
+    if not labels:
+        return None
+
+    colors = px.colors.qualitative.Set1
+    fig = go.Figure()
+    for i, cls in enumerate(labels):
+        color = colors[i % len(colors)]
+        fig.add_trace(go.Box(
+            y=by_class[cls],
+            name=cls,
+            marker_color=color,
+            boxpoints='outliers',   # 이상치만 개별 점으로, 겹침 고리 없음
+            marker_size=4,
+            line_width=2,
+            hovertemplate='속도: <b>%{y:.1f}</b> km/h<extra>' + cls + '</extra>',
+        ))
+
+    fig.update_layout(
+        title='클래스별 속도 분포',
+        yaxis_title='속도 (km/h)',
+        height=420,
+        showlegend=False,
+        template='plotly_white',
+        hovermode='closest',
+        margin=dict(t=60, b=50, l=60, r=20),
+    )
+    return fig
+```
+
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - matplotlib 차트 함수 내에서 `import numpy as np`와 `plt.cm.tab10`을 사용하던 코드는 Plotly 버전에서 완전히 삭제됨. `np`가 파일 다른 곳에서도 쓰인다면 상단 `import numpy as np`는 그대로 유지.
+  - `make_subplots`의 `subplot_titles`에 한글을 넣어도 브라우저에서 정상 렌더링. matplotlib과 달리 폰트 설정 없음.
+  - `legendgroup=lbl`과 `showlegend=False`를 두 번째 서브플롯 트레이스에 설정하는 것이 핵심 — 그렇지 않으면 같은 감지선 이름이 범례에 2번 나타남.
+  - Plotly Figure를 반환해도 `gr.Plot` 컴포넌트는 그대로 사용 가능 (별도 컴포넌트 타입 변경 불필요).
+  - `hovertemplate` 안의 `%{y}`, `%{x}` 는 Plotly 템플릿 변수이므로 Python f-string으로 만들면 안 됨. `<extra>...</extra>` 태그는 호버 상자의 오른쪽 파란 레이블(트레이스 이름) 을 커스텀하는 Plotly 문법.
+- **파일**: `app.py`
+
+---
+
 ## 라이선스
 
 MIT
