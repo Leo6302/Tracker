@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import numpy as np
 import pandas as pd
 import torch
 import yaml
@@ -49,19 +50,8 @@ COCO_TRACKABLE = [
     "bird", "cat", "dog", "horse", "sheep", "cow",
 ]
 
-DEFAULT_LINES = '[{"label": "Line 1", "x1": 100, "y1": 300, "x2": 800, "y2": 300}]'
-DEFAULT_ZONES = '[]'
-DEFAULT_ZONE_AREAS = '{}'
-
 _STATS_HISTORY: deque = deque(maxlen=60)
-psutil.cpu_percent(interval=None)  # prime first measurement
-
-
-def _safe_json(text, default):
-    try:
-        return json.loads(text)
-    except Exception:
-        return default
+psutil.cpu_percent(interval=None)
 
 
 def _collect_stats() -> dict:
@@ -78,12 +68,8 @@ def _collect_stats() -> dict:
         except Exception:
             pass
     entry = {
-        'cpu': cpu,
-        'ram': mem.percent,
-        'ram_gb': mem.used / 1e9,
-        'gpu': gpu_load,
-        'gpu_mem': gpu_mem,
-        'has_gpu': has_gpu,
+        'cpu': cpu, 'ram': mem.percent, 'ram_gb': mem.used / 1e9,
+        'gpu': gpu_load, 'gpu_mem': gpu_mem, 'has_gpu': has_gpu,
     }
     _STATS_HISTORY.append(entry)
     return entry
@@ -126,7 +112,6 @@ def _update_monitor():
 
 
 def _resolve_file_paths(files) -> list:
-    """Gradio 6.x gr.File multiple이 반환하는 FileData 객체에서 경로를 추출한다."""
     paths = []
     for f in (files or []):
         if isinstance(f, str):
@@ -140,19 +125,106 @@ def _resolve_file_paths(files) -> list:
     return [p for p in paths if p]
 
 
+def _make_traffic_count_chart(counting_data):
+    """Grouped bar chart: per-class count and flow rate per counting line."""
+    if not counting_data:
+        return None
+    all_cls = sorted({cls for line in counting_data for cls in line.get('counts', {})})
+    if not all_cls:
+        return None
+
+    n_lines = len(counting_data)
+    n_cls = len(all_cls)
+    x = np.arange(n_cls)
+    width = min(0.6 / max(n_lines, 1), 0.35)
+    palette = [plt.cm.tab10(i / 10) for i in range(n_lines)]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(8, n_cls * 2 + 3), 4))
+
+    for i, line in enumerate(counting_data):
+        lbl = line.get('label', f'Line {i+1}')
+        offset = (i - (n_lines - 1) / 2) * width
+        counts = [line.get('counts', {}).get(cls, 0) for cls in all_cls]
+        flows = [line.get('flow_rates_veh_hr', {}).get(cls, 0) for cls in all_cls]
+        ax1.bar(x + offset, counts, width, label=lbl, color=palette[i], alpha=0.85)
+        ax2.bar(x + offset, flows, width, label=lbl, color=palette[i], alpha=0.85)
+
+    for ax, title, ylabel in [
+        (ax1, '클래스별 통과 수', '통과 수'),
+        (ax2, '클래스별 유량 (대/시)', '유량 (대/시)'),
+    ]:
+        ax.set_xticks(x)
+        ax.set_xticklabels(all_cls, rotation=15, ha='right', fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.set_title(title, fontsize=10, fontweight='bold')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3, axis='y')
+        for spine in ('top', 'right'):
+            ax.spines[spine].set_visible(False)
+
+    fig.tight_layout()
+    return fig
+
+
+def _make_speed_chart(speed_data):
+    """Box plot of speed distribution per class using raw track samples."""
+    if not speed_data:
+        return None
+    track_speeds = speed_data.get('track_speeds', {})
+    track_cls = speed_data.get('track_cls', {})
+    if not track_speeds:
+        return None
+
+    by_class: dict = {}
+    for tid, speeds in track_speeds.items():
+        cls = track_cls.get(tid) or track_cls.get(str(tid), 'unknown')
+        by_class.setdefault(cls, []).extend(speeds)
+
+    labels = [cls for cls in sorted(by_class) if len(by_class[cls]) >= 2]
+    if not labels:
+        return None
+
+    fig, ax = plt.subplots(figsize=(max(4, len(labels) * 1.8 + 2), 4))
+    palette = [plt.cm.tab10(i / 10) for i in range(len(labels))]
+    bp = ax.boxplot(
+        [by_class[cls] for cls in labels],
+        labels=labels, patch_artist=True,
+        medianprops={'color': '#c0392b', 'linewidth': 2},
+        flierprops={'marker': 'o', 'markersize': 3, 'alpha': 0.5},
+    )
+    for patch, color in zip(bp['boxes'], palette):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+
+    ax.set_ylabel('속도 (km/h)', fontsize=9)
+    ax.set_title('클래스별 속도 분포', fontsize=10, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    for spine in ('top', 'right'):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+# ── process_videos ────────────────────────────────────────────────────────
+# Line inputs: 4 lines × (enable, label, x1, y1, x2, y2) = 24 params
+# Zone inputs: 4 zones × (enable, name, x1, y1, x2, y2, area) = 28 params
+
 def process_videos(
     video_input, batch_files,
     yolo_model, conf_thresh, seq_len, pred_len, lstm_mode, class_filter,
-    # Session
     session_notes,
-    # Traffic analysis
-    enable_traffic, counting_lines_json, ref_real_m, ref_px,
-    enable_speed, enable_od,
-    # Urban analysis
-    enable_urban, enable_heatmap, heatmap_classes, zones_json, zone_areas_json,
-    # Calibration
+    enable_traffic,
+    l1_en, l1_lbl, l1_x1, l1_y1, l1_x2, l1_y2,
+    l2_en, l2_lbl, l2_x1, l2_y1, l2_x2, l2_y2,
+    l3_en, l3_lbl, l3_x1, l3_y1, l3_x2, l3_y2,
+    l4_en, l4_lbl, l4_x1, l4_y1, l4_x2, l4_y2,
+    ref_real_m, ref_px, enable_speed, enable_od,
+    enable_urban, enable_heatmap, heatmap_classes,
+    z1_en, z1_nm, z1_x1, z1_y1, z1_x2, z1_y2, z1_area,
+    z2_en, z2_nm, z2_x1, z2_y1, z2_x2, z2_y2, z2_area,
+    z3_en, z3_nm, z3_x1, z3_y1, z3_x2, z3_y2, z3_area,
+    z4_en, z4_nm, z4_x1, z4_y1, z4_x2, z4_y2, z4_area,
     calib_mode,
-    # Export
     export_format, enable_mc_dropout, chart_format,
     progress=gr.Progress(track_tqdm=True),
 ):
@@ -170,10 +242,44 @@ def process_videos(
         paths = []
 
     if not paths:
-        return (None, None, None, "영상을 먼저 업로드해주세요.") + (None,) * 10
+        return (None, None, None, "영상을 먼저 업로드해주세요.") + (None,) * 11
 
     is_batch = len(paths) > 1
     total_videos = len(paths)
+
+    # ── 감지선 JSON 빌드 ──────────────────────────────────────────
+    _line_raw = [
+        (l1_en, l1_lbl, l1_x1, l1_y1, l1_x2, l1_y2),
+        (l2_en, l2_lbl, l2_x1, l2_y1, l2_x2, l2_y2),
+        (l3_en, l3_lbl, l3_x1, l3_y1, l3_x2, l3_y2),
+        (l4_en, l4_lbl, l4_x1, l4_y1, l4_x2, l4_y2),
+    ]
+    counting_lines = [
+        {
+            "label": (lbl or f"Line {i+1}"),
+            "x1": int(x1 or 0), "y1": int(y1 or 0),
+            "x2": int(x2 or 0), "y2": int(y2 or 0),
+        }
+        for i, (en, lbl, x1, y1, x2, y2) in enumerate(_line_raw) if en
+    ] if enable_traffic else []
+
+    # ── 존 JSON 빌드 ──────────────────────────────────────────────
+    _zone_raw = [
+        (z1_en, z1_nm, z1_x1, z1_y1, z1_x2, z1_y2, z1_area),
+        (z2_en, z2_nm, z2_x1, z2_y1, z2_x2, z2_y2, z2_area),
+        (z3_en, z3_nm, z3_x1, z3_y1, z3_x2, z3_y2, z3_area),
+        (z4_en, z4_nm, z4_x1, z4_y1, z4_x2, z4_y2, z4_area),
+    ]
+    zones = []
+    zone_areas = {}
+    for i, (en, nm, x1, y1, x2, y2, area) in enumerate(_zone_raw):
+        if not en:
+            continue
+        nm = nm or f"Zone {chr(65 + i)}"
+        x1, y1, x2, y2 = int(x1 or 0), int(y1 or 0), int(x2 or 0), int(y2 or 0)
+        zones.append({"name": nm, "polygon": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]})
+        if area:
+            zone_areas[nm] = float(area)
 
     # ── 공통 설정 ─────────────────────────────────────────────────
     config = {**BASE_CONFIG,
@@ -193,10 +299,6 @@ def process_videos(
     scale_mpp = None
     if ref_real_m and ref_px and ref_px > 0:
         scale_mpp = float(ref_real_m) / float(ref_px)
-
-    counting_lines = _safe_json(counting_lines_json, []) if enable_traffic else []
-    zones = _safe_json(zones_json, [])
-    zone_areas = _safe_json(zone_areas_json, {})
 
     analysis_config = {
         'enable_traffic': bool(enable_traffic),
@@ -229,7 +331,6 @@ def process_videos(
         )
         all_results.append((vpath, result))
 
-    # ── 마지막 영상 기준 상세 출력 ────────────────────────────────
     last_vpath, last_result = all_results[-1]
     last_stats = last_result['stats']
     last_analysis = last_result.get('analysis', {})
@@ -249,42 +350,11 @@ def process_videos(
             f"  |  장치: {DEVICE_DESC}"
         )
 
-    # -- Traffic summary DataFrame --
-    traffic_df = None
+    # ── 교통 분석 차트 ────────────────────────────────────────────
     counting_data = last_analysis.get('counting_lines', [])
-    if counting_data:
-        rows = []
-        for line in counting_data:
-            for cls, cnt in line.get('counts', {}).items():
-                rows.append({
-                    '감지선': line['label'],
-                    '클래스': cls,
-                    '통과 수': cnt,
-                    '유량 (대/시)': line.get('flow_rates_veh_hr', {}).get(cls, ''),
-                    '평균 차두시간 (s)': line.get('headway', {}).get(cls, {}).get('mean_s', ''),
-                    '속도 P85 (km/h)': '',
-                })
-        if rows:
-            traffic_df = pd.DataFrame(rows)
-
     speed_data = last_analysis.get('speed', {})
-    if speed_data and speed_data.get('per_class'):
-        spd_rows = [{'클래스': cls, **{f'속도_{k}': v for k, v in st.items()}}
-                    for cls, st in speed_data['per_class'].items()]
-        speed_df = pd.DataFrame(spd_rows)
-    else:
-        speed_df = None
-
-    if traffic_df is not None and speed_df is not None:
-        traffic_df = traffic_df.merge(
-            speed_df[['클래스', '속도_p85']].rename(columns={'속도_p85': '속도 P85 (km/h)'}),
-            on='클래스', how='left', suffixes=('', '_spd')
-        )
-        if '속도 P85 (km/h)_spd' in traffic_df.columns:
-            traffic_df['속도 P85 (km/h)'] = traffic_df['속도 P85 (km/h)_spd']
-            traffic_df.drop(columns=['속도 P85 (km/h)_spd'], inplace=True)
-    elif speed_df is not None and traffic_df is None:
-        traffic_df = speed_df
+    traffic_count_fig = _make_traffic_count_chart(counting_data)
+    traffic_speed_fig = _make_speed_chart(speed_data)
 
     od_df = None
     od_data = last_analysis.get('od_matrix', {})
@@ -309,7 +379,7 @@ def process_videos(
         if rows:
             zone_df = pd.DataFrame(rows)
 
-    # -- Session (단일 모드만) --
+    # ── 세션 저장 ─────────────────────────────────────────────────
     session_out = None
     if not is_batch:
         tmp_dir = Path(tempfile.mkdtemp())
@@ -377,12 +447,14 @@ def process_videos(
                         zf.write(fpath, f"{prefix}/{arcname}")
         batch_zip_path = str(zip_tmp)
 
+    # 15 outputs
     return (
         last_result['video'],
         last_result['csv'],
         last_result['trajectory_img'],
         status,
-        traffic_df,
+        traffic_count_fig,
+        traffic_speed_fig,
         od_df,
         last_result.get('heatmap_img'),
         zone_df,
@@ -396,20 +468,46 @@ def process_videos(
 
 
 def restore_session(session_file):
+    # 68 outputs: 4 + 3 + 1 + 24(lines) + 2 + 3 + 28(zones) + 3
     if not session_file:
-        return (gr.skip(),) * 19
+        return (gr.skip(),) * 68
     path = session_file if isinstance(session_file, str) else session_file.name
     cfg = AnalysisSession.load(path)
     gr.Info(f"세션 불러오기 완료  (생성일: {cfg.created_at or '알 수 없음'})")
     lstm_mode_label = "온라인 파인튜닝" if cfg.lstm_mode == "finetune" else "사전학습 모델"
+
+    # Restore 4 counting line slots
+    lines = cfg.counting_lines or []
+    line_vals = [(False, f"Line {i+1}", 0, 0, 0, 0) for i in range(4)]
+    for i, ln in enumerate(lines[:4]):
+        line_vals[i] = (
+            True, ln.get('label', f'Line {i+1}'),
+            int(ln.get('x1', 0)), int(ln.get('y1', 0)),
+            int(ln.get('x2', 0)), int(ln.get('y2', 0)),
+        )
+    line_flat = [v for t in line_vals for v in t]
+
+    # Restore 4 zone slots
+    zones_list = cfg.zones or []
+    zone_areas_dict = cfg.zone_areas or {}
+    zone_vals = [(False, f"Zone {chr(65+i)}", 0, 0, 0, 0, 0.0) for i in range(4)]
+    for i, zone in enumerate(zones_list[:4]):
+        nm = zone.get('name', f'Zone {chr(65+i)}')
+        poly = zone.get('polygon', [[0, 0], [0, 0], [0, 0], [0, 0]])
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        zone_vals[i] = (True, nm, min(xs), min(ys), max(xs), max(ys),
+                        float(zone_areas_dict.get(nm, 0.0)))
+    zone_flat = [v for t in zone_vals for v in t]
+
     return (
         cfg.yolo_model, cfg.conf_thresh, cfg.seq_len, cfg.pred_len,
         lstm_mode_label, cfg.class_filter, cfg.notes or '',
-        cfg.enable_traffic, json.dumps(cfg.counting_lines, ensure_ascii=False),
+        cfg.enable_traffic,
+        *line_flat,
         cfg.enable_speed, cfg.enable_od,
         cfg.enable_urban, cfg.enable_heatmap, cfg.heatmap_classes,
-        json.dumps(cfg.zones, ensure_ascii=False),
-        json.dumps(cfg.zone_areas, ensure_ascii=False),
+        *zone_flat,
         cfg.export_format, cfg.enable_mc_dropout, cfg.chart_format,
     )
 
@@ -417,15 +515,8 @@ def restore_session(session_file):
 # ── CSS ───────────────────────────────────────────────────────────────────
 
 css = """
-/* ── Light mode page background ──────────────────────────── */
-html, body {
-    background: #f0f0f0 !important;
-}
-html.dark, html.dark body {
-    background: #161616 !important;
-}
-
-/* ── Gradio container — full viewport width ───────────────── */
+html, body { background: #f0f0f0 !important; }
+html.dark, html.dark body { background: #161616 !important; }
 .gradio-container {
     background: transparent !important;
     max-width: 100% !important;
@@ -433,8 +524,6 @@ html.dark, html.dark body {
     padding-right: 28px !important;
     box-sizing: border-box !important;
 }
-
-/* ── Run button ─────────────────────────────────────────── */
 #run-btn button {
     background: #1d3a56 !important;
     color: #fff !important;
@@ -447,18 +536,14 @@ html.dark, html.dark body {
 }
 #run-btn button:hover { background: #274f78 !important; }
 #run-btn button:active { background: #162c42 !important; }
-
-/* ── Status box ──────────────────────────────────────────── */
 #status-box textarea {
     font-size: 12px !important;
     font-family: 'Menlo', 'Consolas', 'Courier New', monospace !important;
 }
 """
 
-# ── Helper ────────────────────────────────────────────────────────────────
 
 def _sec(text):
-    """Section label with inline styles — works regardless of Gradio CSS scoping."""
     return gr.HTML(
         f'<p style="'
         f'font-size:14px;font-weight:700;letter-spacing:0.09em;'
@@ -547,66 +632,88 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                     label="추적 대상 클래스",
                 )
 
-            # Traffic Analysis
+            # ── Traffic Analysis ─────────────────────────────────────
             with gr.Accordion("교통 분석", open=False):
                 gr.Markdown(
                     "가상 감지선 통과 계수·유량·속도 추정·OD 행렬 등 도로 교통 분석 기능을 켜고 설정합니다.",
                     elem_classes="note",
                 )
                 enable_traffic = gr.Checkbox(label="교통 분석 활성화", value=False)
+
                 gr.Markdown(
-                    "감지선 정의 (JSON) — 가상 루프 검지기처럼 통과 차량을 계수합니다.",
+                    "**감지선 정의** — 시작점(x1, y1)에서 끝점(x2, y2)으로 이어지는 가상 선을 정의합니다. "
+                    "통과 차량을 자동으로 계수합니다.",
                     elem_classes="note",
                 )
-                counting_lines_json = gr.Textbox(
-                    value=DEFAULT_LINES,
-                    label='감지선  (JSON: label, x1, y1, x2, y2)',
-                    lines=3,
-                )
+
+                # 4 counting line slots
+                line_widgets = []
+                _line_defaults = [
+                    (True,  "Line 1", 100, 300, 800, 300),
+                    (False, "Line 2",   0,   0,   0,   0),
+                    (False, "Line 3",   0,   0,   0,   0),
+                    (False, "Line 4",   0,   0,   0,   0),
+                ]
+                for _i, (_en, _lbl, _x1, _y1, _x2, _y2) in enumerate(_line_defaults):
+                    with gr.Group():
+                        with gr.Row():
+                            _ln_en  = gr.Checkbox(label=f"Line {_i+1} 활성화", value=_en, scale=1)
+                            _ln_lbl = gr.Textbox(value=_lbl, label="이름", scale=2)
+                        with gr.Row():
+                            _ln_x1 = gr.Number(value=_x1, label="x1 (시작)", step=1, scale=1)
+                            _ln_y1 = gr.Number(value=_y1, label="y1 (시작)", step=1, scale=1)
+                            _ln_x2 = gr.Number(value=_x2, label="x2 (끝)",   step=1, scale=1)
+                            _ln_y2 = gr.Number(value=_y2, label="y2 (끝)",   step=1, scale=1)
+                    line_widgets.append((_ln_en, _ln_lbl, _ln_x1, _ln_y1, _ln_x2, _ln_y2))
+
                 gr.Markdown(
-                    "속도 추정 스케일 — 실거리와 픽셀 거리를 입력하면 km/h로 변환합니다.",
+                    "**속도 추정 스케일** — 실거리와 픽셀 거리를 입력하면 km/h로 변환합니다.",
                     elem_classes="note",
                 )
                 with gr.Row():
-                    ref_real_m = gr.Number(label="실거리 (m)", value=3.5,
-                                           info="예: 차선폭 3.5 m")
-                    ref_px = gr.Number(label="픽셀 거리 (px)", value=100,
-                                       info="해당 거리의 픽셀 수")
+                    ref_real_m = gr.Number(label="실거리 (m)", value=3.5, info="예: 차선폭 3.5 m")
+                    ref_px     = gr.Number(label="픽셀 거리 (px)", value=100, info="해당 거리의 픽셀 수")
                 with gr.Row():
                     enable_speed = gr.Checkbox(label="속도 추정 (km/h)", value=False)
-                    enable_od = gr.Checkbox(label="OD 행렬", value=False)
+                    enable_od    = gr.Checkbox(label="OD 행렬", value=False)
 
-            # Urban Analysis
+            # ── Urban Analysis ───────────────────────────────────────
             with gr.Accordion("도시 공간 분석", open=False):
                 gr.Markdown(
                     "밀도 열지도와 존별 체류시간·점유율 등 도시 공간 분석 기능을 켜고 설정합니다.",
                     elem_classes="note",
                 )
-                enable_urban = gr.Checkbox(label="도시 분석 활성화", value=False)
+                enable_urban   = gr.Checkbox(label="도시 분석 활성화", value=False)
                 enable_heatmap = gr.Checkbox(label="밀도 열지도 생성", value=True)
                 heatmap_classes = gr.CheckboxGroup(
                     choices=COCO_TRACKABLE,
                     value=["person"],
                     label="열지도 대상 클래스",
                 )
+
                 gr.Markdown(
-                    "존 정의 (JSON) — 교통 분석의 OD 행렬과 공유됩니다.",
+                    "**존 정의** — 직사각형 분석 영역을 정의합니다. 좌상단(x1, y1)과 우하단(x2, y2) "
+                    "픽셀 좌표를 입력하세요. 교통 분석의 OD 행렬과 공유됩니다.",
                     elem_classes="note",
                 )
-                zones_json = gr.Textbox(
-                    value=DEFAULT_ZONES,
-                    label='존 정의  (JSON: name, polygon [[x,y],...])',
-                    lines=4,
-                    placeholder='[{"name": "Zone A", "polygon": [[100,100],[300,100],[300,300],[100,300]]}]',
-                )
-                zone_areas_json = gr.Textbox(
-                    value=DEFAULT_ZONE_AREAS,
-                    label='존 면적  (JSON, m²) — 밀도 계산용',
-                    lines=2,
-                    placeholder='{"Zone A": 50.0, "Zone B": 30.0}',
-                )
 
-            # Calibration
+                # 4 zone slots
+                zone_widgets = []
+                for _i in range(4):
+                    with gr.Group():
+                        with gr.Row():
+                            _z_en   = gr.Checkbox(label=f"Zone {chr(65+_i)} 활성화", value=False, scale=1)
+                            _z_nm   = gr.Textbox(value=f"Zone {chr(65+_i)}", label="이름", scale=2)
+                            _z_area = gr.Number(value=0.0, label="면적 (m²)", scale=1,
+                                                info="밀도 계산용, 0이면 생략")
+                        with gr.Row():
+                            _z_x1 = gr.Number(value=0, label="x1 (좌상단)", step=1, scale=1)
+                            _z_y1 = gr.Number(value=0, label="y1 (좌상단)", step=1, scale=1)
+                            _z_x2 = gr.Number(value=0, label="x2 (우하단)", step=1, scale=1)
+                            _z_y2 = gr.Number(value=0, label="y2 (우하단)", step=1, scale=1)
+                    zone_widgets.append((_z_en, _z_nm, _z_x1, _z_y1, _z_x2, _z_y2, _z_area))
+
+            # ── Calibration ──────────────────────────────────────────
             with gr.Accordion("캘리브레이션", open=False):
                 gr.Markdown(
                     "픽셀→실세계 거리 변환 방식을 선택합니다. '기준거리' 선택 시 교통 분석에 입력한 실거리·픽셀거리로 m/px를 자동 계산합니다.",
@@ -663,9 +770,7 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
             status_box = gr.Textbox(label="상태", interactive=False,
                                     lines=1, elem_id="status-box")
             monitor_summary = gr.Textbox(
-                label="시스템",
-                interactive=False,
-                lines=1,
+                label="시스템", interactive=False, lines=1,
                 elem_id="monitor-summary",
             )
             with gr.Accordion("상세 모니터링", open=False):
@@ -687,14 +792,15 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
             )
             with gr.Row():
                 video_output = gr.Video(label="어노테이션 영상")
-                summary_img = gr.Image(label="궤적 요약", type="filepath")
+                summary_img  = gr.Image(label="궤적 요약", type="filepath")
 
             with gr.Accordion("교통 분석 결과", open=False):
                 gr.Markdown(
-                    "감지선 통과 통계 — 클래스별 계수·유량·차두시간·속도",
+                    "감지선 통과 통계 — 클래스별 계수·유량·속도 분포를 차트로 표시합니다.",
                     elem_classes="note",
                 )
-                traffic_df_out = gr.DataFrame(label="교통 지표")
+                traffic_count_plot = gr.Plot(label="통과 수 / 유량")
+                traffic_speed_plot = gr.Plot(label="속도 분포")
                 gr.Markdown("Origin-Destination 행렬", elem_classes="note")
                 od_df_out = gr.DataFrame(label="OD 행렬")
 
@@ -716,10 +822,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                 'margin:24px 0 8px 0;line-height:1.5;display:block;">내보내기</p>'
             )
             with gr.Row():
-                csv_download = gr.File(label="예측 데이터  (CSV)")
+                csv_download   = gr.File(label="예측 데이터  (CSV)")
                 excel_download = gr.File(label="연구 보고서  (Excel)")
             with gr.Row():
-                charts_download = gr.File(label="분석 차트  (HTML / SVG)")
+                charts_download  = gr.File(label="분석 차트  (HTML / SVG)")
                 session_download = gr.File(label="세션 파일  (JSON)")
 
             gr.HTML(
@@ -733,16 +839,21 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                 elem_classes="note",
             )
             batch_summary_df_out = gr.DataFrame(label="영상별 처리 요약")
-            batch_zip_download = gr.File(label="전체 결과 다운로드 (ZIP)")
+            batch_zip_download   = gr.File(label="전체 결과 다운로드 (ZIP)")
+
+    # ── Flatten widget lists ──────────────────────────────────────────────
+    _line_inputs_flat = [w for tup in line_widgets for w in tup]   # 4×6 = 24
+    _zone_inputs_flat = [w for tup in zone_widgets for w in tup]   # 4×7 = 28
 
     _all_outputs = [
         video_output, csv_download, summary_img, status_box,
-        traffic_df_out, od_df_out,
+        traffic_count_plot, traffic_speed_plot,
+        od_df_out,
         heatmap_img_out, zone_df_out,
         track_summary_df_out,
         excel_download, charts_download, session_download,
         batch_summary_df_out, batch_zip_download,
-    ]
+    ]  # 15 outputs
 
     run_btn.click(
         fn=process_videos,
@@ -751,10 +862,11 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
             yolo_model, conf_thresh, seq_len, pred_len,
             lstm_mode, class_filter,
             session_notes,
-            enable_traffic, counting_lines_json, ref_real_m, ref_px,
-            enable_speed, enable_od,
+            enable_traffic,
+            *_line_inputs_flat,
+            ref_real_m, ref_px, enable_speed, enable_od,
             enable_urban, enable_heatmap, heatmap_classes,
-            zones_json, zone_areas_json,
+            *_zone_inputs_flat,
             calib_mode,
             export_format, enable_mc_dropout, chart_format,
         ],
@@ -767,16 +879,17 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
         outputs=[
             yolo_model, conf_thresh, seq_len, pred_len,
             lstm_mode, class_filter, session_notes,
-            enable_traffic, counting_lines_json,
+            enable_traffic,
+            *_line_inputs_flat,
             enable_speed, enable_od,
             enable_urban, enable_heatmap, heatmap_classes,
-            zones_json, zone_areas_json,
+            *_zone_inputs_flat,
             export_format, enable_mc_dropout, chart_format,
         ],
     )
 
     video_input.clear(
-        fn=lambda: (None,) * 14,
+        fn=lambda: (None,) * 15,
         inputs=[],
         outputs=_all_outputs,
     )
@@ -803,7 +916,6 @@ if __name__ == "__main__":
     from starlette.middleware.base import BaseHTTPMiddleware
 
     class _SABHeadersMiddleware(BaseHTTPMiddleware):
-        """Add COOP/COEP headers so FFmpeg.wasm (Gradio VideoEditor trim) can use SharedArrayBuffer."""
         async def dispatch(self, request, call_next):
             response = await call_next(request)
             response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
