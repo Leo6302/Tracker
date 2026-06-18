@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import cv2
 import numpy as np
@@ -7,7 +8,19 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
-import imageio_ffmpeg
+
+
+def _get_ffmpeg_exe():
+    """Return an ffmpeg executable path, or None if none is available.
+
+    Priority: imageio-ffmpeg (bundled static build) → system ffmpeg.
+    """
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        pass
+    return shutil.which('ffmpeg')
 
 
 class VideoExporter:
@@ -22,18 +35,20 @@ class VideoExporter:
 
     def release(self):
         self.writer.release()
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        result = subprocess.run(
-            [ffmpeg_exe, '-y', '-i', str(self.raw_path),
-             '-c:v', 'libx264', '-preset', 'veryfast',
-             '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-             str(self.output_path)],
-            capture_output=True,
-        )
-        if result.returncode != 0 or not self.output_path.exists():
-            self.raw_path.replace(self.output_path)
-        else:
-            self.raw_path.unlink(missing_ok=True)
+        ffmpeg_exe = _get_ffmpeg_exe()
+        if ffmpeg_exe:
+            result = subprocess.run(
+                [ffmpeg_exe, '-y', '-i', str(self.raw_path),
+                 '-c:v', 'libx264', '-preset', 'veryfast',
+                 '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+                 str(self.output_path)],
+                capture_output=True,
+            )
+            if result.returncode == 0 and self.output_path.exists():
+                self.raw_path.unlink(missing_ok=True)
+                return
+        # ffmpeg unavailable or failed — fall back to raw mp4v file
+        self.raw_path.replace(self.output_path)
 
 
 class CSVExporter:

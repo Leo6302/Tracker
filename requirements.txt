@@ -13,4 +13,4 @@ plotly
 kaleido
 psutil
 gputil
-imageio-ffmpeg
+imageio-ffmpeg  # optional: enables H.264 re-encoding for in-browser video playback
