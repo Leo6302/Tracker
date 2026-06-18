@@ -23,6 +23,9 @@ from datetime import datetime
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 
 try:
     import GPUtil as _gputil_mod
@@ -126,7 +129,7 @@ def _resolve_file_paths(files) -> list:
 
 
 def _make_traffic_count_chart(counting_data):
-    """Grouped bar chart: per-class count and flow rate per counting line."""
+    """Grouped bar chart (Plotly): per-class count and flow rate per counting line."""
     if not counting_data:
         return None
     all_cls = sorted({cls for line in counting_data for cls in line.get('counts', {})})
@@ -134,40 +137,47 @@ def _make_traffic_count_chart(counting_data):
         return None
 
     n_lines = len(counting_data)
-    n_cls = len(all_cls)
-    x = np.arange(n_cls)
-    width = min(0.6 / max(n_lines, 1), 0.35)
-    palette = [plt.cm.tab10(i / 10) for i in range(n_lines)]
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(8, n_cls * 2 + 3), 4))
+    colors = px.colors.qualitative.Set1
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=['클래스별 통과 수', '클래스별 유량 (대/시)'],
+        horizontal_spacing=0.12,
+    )
 
     for i, line in enumerate(counting_data):
         lbl = line.get('label', f'Line {i+1}')
-        offset = (i - (n_lines - 1) / 2) * width
         counts = [line.get('counts', {}).get(cls, 0) for cls in all_cls]
         flows = [line.get('flow_rates_veh_hr', {}).get(cls, 0) for cls in all_cls]
-        ax1.bar(x + offset, counts, width, label=lbl, color=palette[i], alpha=0.85)
-        ax2.bar(x + offset, flows, width, label=lbl, color=palette[i], alpha=0.85)
+        color = colors[i % len(colors)]
 
-    for ax, title, ylabel in [
-        (ax1, '클래스별 통과 수', '통과 수'),
-        (ax2, '클래스별 유량 (대/시)', '유량 (대/시)'),
-    ]:
-        ax.set_xticks(x)
-        ax.set_xticklabels(all_cls, rotation=15, ha='right', fontsize=9)
-        ax.set_ylabel(ylabel, fontsize=9)
-        ax.set_title(title, fontsize=10, fontweight='bold')
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3, axis='y')
-        for spine in ('top', 'right'):
-            ax.spines[spine].set_visible(False)
+        fig.add_trace(go.Bar(
+            name=lbl, x=all_cls, y=counts,
+            marker_color=color, legendgroup=lbl,
+            hovertemplate='<b>%{x}</b><br>통과 수: <b>%{y}</b><extra>' + lbl + '</extra>',
+        ), row=1, col=1)
 
-    fig.tight_layout()
+        fig.add_trace(go.Bar(
+            name=lbl, x=all_cls, y=[round(v, 1) for v in flows],
+            marker_color=color, legendgroup=lbl, showlegend=False,
+            hovertemplate='<b>%{x}</b><br>유량: <b>%{y:.1f}</b> 대/시<extra>' + lbl + '</extra>',
+        ), row=1, col=2)
+
+    fig.update_layout(
+        barmode='group',
+        height=420,
+        legend_title_text='감지선',
+        yaxis_title='통과 수',
+        yaxis2_title='유량 (대/시)',
+        template='plotly_white',
+        hovermode='x unified',
+        margin=dict(t=60, b=50, l=60, r=20),
+    )
+    fig.update_xaxes(tickangle=-20)
     return fig
 
 
 def _make_speed_chart(speed_data):
-    """Box plot of speed distribution per class using raw track samples."""
+    """Box plot (Plotly): speed distribution per class using raw track samples."""
     if not speed_data:
         return None
     track_speeds = speed_data.get('track_speeds', {})
@@ -184,24 +194,29 @@ def _make_speed_chart(speed_data):
     if not labels:
         return None
 
-    fig, ax = plt.subplots(figsize=(max(4, len(labels) * 1.8 + 2), 4))
-    palette = [plt.cm.tab10(i / 10) for i in range(len(labels))]
-    bp = ax.boxplot(
-        [by_class[cls] for cls in labels],
-        labels=labels, patch_artist=True,
-        medianprops={'color': '#c0392b', 'linewidth': 2},
-        flierprops={'marker': 'o', 'markersize': 3, 'alpha': 0.5},
-    )
-    for patch, color in zip(bp['boxes'], palette):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.7)
+    colors = px.colors.qualitative.Set1
+    fig = go.Figure()
+    for i, cls in enumerate(labels):
+        color = colors[i % len(colors)]
+        fig.add_trace(go.Box(
+            y=by_class[cls],
+            name=cls,
+            marker_color=color,
+            boxpoints='outliers',
+            marker_size=4,
+            line_width=2,
+            hovertemplate='속도: <b>%{y:.1f}</b> km/h<extra>' + cls + '</extra>',
+        ))
 
-    ax.set_ylabel('속도 (km/h)', fontsize=9)
-    ax.set_title('클래스별 속도 분포', fontsize=10, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
-    for spine in ('top', 'right'):
-        ax.spines[spine].set_visible(False)
-    fig.tight_layout()
+    fig.update_layout(
+        title='클래스별 속도 분포',
+        yaxis_title='속도 (km/h)',
+        height=420,
+        showlegend=False,
+        template='plotly_white',
+        hovermode='closest',
+        margin=dict(t=60, b=50, l=60, r=20),
+    )
     return fig
 
 
