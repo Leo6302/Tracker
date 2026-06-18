@@ -59,6 +59,7 @@ class SpeedEstimator:
         return {
             'per_class': per_class,
             'track_speeds': dict(self.track_speeds),
+            'track_cls': dict(self.track_cls),
             'scale_mpp': self.scale_mpp,
         }
 

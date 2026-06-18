@@ -1,3 +1,4 @@
+import subprocess
 import cv2
 import numpy as np
 import pandas as pd
@@ -6,18 +7,33 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
+import imageio_ffmpeg
 
 
 class VideoExporter:
     def __init__(self, output_path, fps, frame_size):
+        self.output_path = Path(output_path)
+        self.raw_path = self.output_path.with_suffix('.raw.mp4')
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        self.writer = cv2.VideoWriter(str(output_path), fourcc, fps, frame_size)
+        self.writer = cv2.VideoWriter(str(self.raw_path), fourcc, fps, frame_size)
 
     def write_frame(self, frame: np.ndarray):
         self.writer.write(frame)
 
     def release(self):
         self.writer.release()
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        result = subprocess.run(
+            [ffmpeg_exe, '-y', '-i', str(self.raw_path),
+             '-c:v', 'libx264', '-preset', 'veryfast',
+             '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+             str(self.output_path)],
+            capture_output=True,
+        )
+        if result.returncode != 0 or not self.output_path.exists():
+            self.raw_path.replace(self.output_path)
+        else:
+            self.raw_path.unlink(missing_ok=True)
 
 
 class CSVExporter:
@@ -103,3 +119,37 @@ class SummaryImageExporter:
         plt.tight_layout()
         plt.savefig(path, dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
         plt.close()
+
+
+def build_track_summary(rows, scale_mpp=None, speed_data=None):
+    by_track: dict = {}
+    for r in rows:
+        by_track.setdefault(r['track_id'], []).append(r)
+
+    speed_data = speed_data or {}
+    track_speeds = speed_data.get('track_speeds', {})
+    unit = 'm' if scale_mpp else 'px'
+
+    summary = []
+    for tid, rs in by_track.items():
+        rs.sort(key=lambda r: r['frame'])
+        dist_px = sum(
+            ((rs[i]['cx'] - rs[i - 1]['cx']) ** 2
+             + (rs[i]['cy'] - rs[i - 1]['cy']) ** 2) ** 0.5
+            for i in range(1, len(rs))
+        )
+        dist = dist_px * scale_mpp if scale_mpp else dist_px
+        row = {
+            'track_id': tid, 'class': rs[0]['class'],
+            'entry_frame': rs[0]['frame'], 'exit_frame': rs[-1]['frame'],
+            'duration_frames': rs[-1]['frame'] - rs[0]['frame'] + 1,
+            f'distance_{unit}': round(dist, 2),
+        }
+        spd = track_speeds.get(tid) or track_speeds.get(str(tid))
+        if spd:
+            row['mean_speed_kmh'] = round(float(np.mean(spd)), 1)
+            row['max_speed_kmh'] = round(float(np.max(spd)), 1)
+        summary.append(row)
+
+    summary.sort(key=lambda r: r['track_id'])
+    return summary

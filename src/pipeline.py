@@ -7,7 +7,7 @@ from .tracking.tracker import VideoTracker
 from .prediction.trainer import ModelManager
 from .prediction.preprocessor import build_sequences, denormalize
 from .visualization.renderer import FrameRenderer, get_color
-from .visualization.exporter import VideoExporter, CSVExporter, SummaryImageExporter
+from .visualization.exporter import VideoExporter, CSVExporter, SummaryImageExporter, build_track_summary
 
 
 def _build_analyzers(analysis_config, fps, fw, fh):
@@ -205,6 +205,12 @@ class TrackingPipeline:
         for az in analyzers:
             analysis_results[az.name] = az.finalize()
 
+        track_summary = build_track_summary(
+            csv_exp.rows,
+            scale_mpp=(analysis_config or {}).get('scale_mpp'),
+            speed_data=analysis_results.get('speed'),
+        )
+
         # Save density heatmap
         heatmap_img_out = None
         if heatmap_az:
@@ -220,7 +226,8 @@ class TrackingPipeline:
                 excel_out = tmp_dir / "research_report.xlsx"
                 ok = ResearchExporter(
                     csv_exp.rows, pred_len, analysis_results,
-                    self.config, duration_s, video_path
+                    self.config, duration_s, video_path,
+                    track_summary=track_summary
                 ).save(excel_out)
                 if not ok:
                     excel_out = None
@@ -251,4 +258,5 @@ class TrackingPipeline:
             'excel': str(excel_out) if excel_out else None,
             'charts': str(charts_out) if charts_out else None,
             'duration_s': duration_s,
+            'track_summary': track_summary,
         }

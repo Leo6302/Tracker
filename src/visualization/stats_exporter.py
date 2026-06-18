@@ -9,13 +9,14 @@ class ResearchExporter:
     """Multi-sheet Excel workbook for research-grade export."""
 
     def __init__(self, csv_rows, pred_len, analysis_results, config,
-                 duration_s, video_path):
+                 duration_s, video_path, track_summary=None):
         self.csv_rows = csv_rows
         self.pred_len = pred_len
         self.analysis = analysis_results
         self.config = config
         self.duration_s = duration_s
         self.video_path = str(video_path)
+        self.track_summary = track_summary or []
 
     def save(self, path) -> bool:
         try:
@@ -33,7 +34,7 @@ class ResearchExporter:
         alt_fill = PatternFill(start_color='EBF0F7', end_color='EBF0F7', fill_type='solid')
         yel_fill = PatternFill(start_color='FFE066', end_color='FFE066', fill_type='solid')
 
-        def _write_df(ws, df, highlight_col_name=None):
+        def _write_df(ws, df, highlight_col_name=None, style_rows=True):
             ws.append(list(df.columns))
             for cell in ws[1]:
                 cell.fill = hdr_fill
@@ -44,20 +45,30 @@ class ResearchExporter:
                 hl_idx = list(df.columns).index(highlight_col_name) + 1
             for i, row in enumerate(df.itertuples(index=False), start=2):
                 ws.append(list(row))
-                if i % 2 == 0:
-                    for cell in ws[i]:
-                        cell.fill = alt_fill
-                if hl_idx:
-                    ws.cell(row=i, column=hl_idx).fill = yel_fill
-            for col in ws.columns:
-                w = max(len(str(cell.value or '')) for cell in col) + 2
-                ws.column_dimensions[get_column_letter(col[0].column)].width = min(w, 35)
+                if style_rows:
+                    if i % 2 == 0:
+                        for cell in ws[i]:
+                            cell.fill = alt_fill
+                    if hl_idx:
+                        ws.cell(row=i, column=hl_idx).fill = yel_fill
+            if style_rows:
+                for col in ws.columns:
+                    w = max(len(str(cell.value or '')) for cell in col) + 2
+                    ws.column_dimensions[get_column_letter(col[0].column)].width = min(w, 35)
+            else:
+                for idx in range(1, len(df.columns) + 1):
+                    ws.column_dimensions[get_column_letter(idx)].width = 14
             ws.freeze_panes = 'A2'
 
-        # Sheet 1: Raw Detections
+        # Sheet 1: Track Summary
+        if self.track_summary:
+            ws = wb.create_sheet('Track Summary')
+            _write_df(ws, pd.DataFrame(self.track_summary))
+
+        # Sheet 2: Raw Detections
         if self.csv_rows:
             ws = wb.create_sheet('Raw Detections')
-            _write_df(ws, pd.DataFrame(self.csv_rows))
+            _write_df(ws, pd.DataFrame(self.csv_rows), style_rows=False)
 
         # Sheet 2: Traffic Summary
         counting = self.analysis.get('counting_lines', [])
@@ -159,23 +170,25 @@ class PlotlyExporter:
         self.analysis = analysis_results
         self.duration_s = duration_s
 
-    def _speed_violin(self):
+    def _speed_box(self):
         try:
             import plotly.graph_objects as go
         except ImportError:
             return None
-        per_class = (self.analysis.get('speed') or {}).get('per_class', {})
-        if not per_class:
+        speed = self.analysis.get('speed') or {}
+        track_speeds = speed.get('track_speeds', {})
+        track_cls = speed.get('track_cls', {})
+        if not track_speeds:
             return None
+        by_class = {}
+        for tid, speeds in track_speeds.items():
+            cls = track_cls.get(tid, 'unknown')
+            by_class.setdefault(cls, []).extend(speeds)
         fig = go.Figure()
-        for cls, stats in per_class.items():
-            if stats['count'] < 2:
+        for cls, ys in by_class.items():
+            if len(ys) < 2:
                 continue
-            # Reconstruct representative distribution from percentiles
-            ys = [stats['p15'], stats['p50'], stats['mean'],
-                  stats['p85'], stats['p95'], stats['max']]
-            fig.add_trace(go.Box(name=cls, y=ys, boxmean=True,
-                                 marker_color='royalblue'))
+            fig.add_trace(go.Box(name=cls, y=ys, boxmean=True, marker_color='royalblue'))
         fig.update_layout(title='Speed Distribution by Class (km/h)',
                           yaxis_title='Speed (km/h)', template='plotly_white')
         return fig
@@ -265,7 +278,7 @@ class PlotlyExporter:
         except ImportError:
             return False
         named_figs = [
-            ('Speed Distribution', self._speed_violin()),
+            ('Speed Distribution', self._speed_box()),
             ('Traffic Flow', self._flow_timeseries()),
             ('OD Flow (Sankey)', self._od_sankey()),
             ('Zone Occupancy', self._zone_heatmap()),
@@ -294,7 +307,7 @@ class PlotlyExporter:
         dir_path = Path(dir_path)
         dir_path.mkdir(parents=True, exist_ok=True)
         named_figs = {
-            'speed': self._speed_violin(),
+            'speed': self._speed_box(),
             'flow': self._flow_timeseries(),
             'od': self._od_sankey(),
             'zone_occupancy': self._zone_heatmap(),

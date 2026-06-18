@@ -13,3 +13,4 @@ plotly
 kaleido
 psutil
 gputil
+imageio-ffmpeg

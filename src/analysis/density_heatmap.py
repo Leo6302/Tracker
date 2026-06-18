@@ -37,13 +37,13 @@ class DensityHeatmapBuilder:
 
     def save_heatmap(self, path, bg_frame=None):
         acc = self.accumulator.copy()
-        if acc.max() > 0:
-            norm = (acc / acc.max() * 255).astype(np.uint8)
-        else:
-            norm = acc.astype(np.uint8)
+        norm = (acc / acc.max() * 255).astype(np.uint8) if acc.max() > 0 else acc.astype(np.uint8)
         colored = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
         if bg_frame is not None:
-            result = cv2.addWeighted(bg_frame, 0.5, colored, 0.5, 0)
+            alpha = (norm.astype(np.float32) / 255.0) ** 0.5
+            alpha = alpha[:, :, None]
+            result = (bg_frame.astype(np.float32) * (1 - alpha)
+                      + colored.astype(np.float32) * alpha).astype(np.uint8)
         else:
             result = colored
         cv2.imwrite(str(path), result)

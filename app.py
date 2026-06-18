@@ -170,7 +170,7 @@ def process_videos(
         paths = []
 
     if not paths:
-        return (None, None, None, "영상을 먼저 업로드해주세요.") + (None,) * 9
+        return (None, None, None, "영상을 먼저 업로드해주세요.") + (None,) * 10
 
     is_batch = len(paths) > 1
     total_videos = len(paths)
@@ -386,11 +386,31 @@ def process_videos(
         od_df,
         last_result.get('heatmap_img'),
         zone_df,
+        pd.DataFrame(last_result.get('track_summary', [])),
         last_result.get('excel'),
         last_result.get('charts'),
         session_out,
         batch_summary_df,
         batch_zip_path,
+    )
+
+
+def restore_session(session_file):
+    if not session_file:
+        return (gr.skip(),) * 19
+    path = session_file if isinstance(session_file, str) else session_file.name
+    cfg = AnalysisSession.load(path)
+    gr.Info(f"세션 불러오기 완료  (생성일: {cfg.created_at or '알 수 없음'})")
+    lstm_mode_label = "온라인 파인튜닝" if cfg.lstm_mode == "finetune" else "사전학습 모델"
+    return (
+        cfg.yolo_model, cfg.conf_thresh, cfg.seq_len, cfg.pred_len,
+        lstm_mode_label, cfg.class_filter, cfg.notes or '',
+        cfg.enable_traffic, json.dumps(cfg.counting_lines, ensure_ascii=False),
+        cfg.enable_speed, cfg.enable_od,
+        cfg.enable_urban, cfg.enable_heatmap, cfg.heatmap_classes,
+        json.dumps(cfg.zones, ensure_ascii=False),
+        json.dumps(cfg.zone_areas, ensure_ascii=False),
+        cfg.export_format, cfg.enable_mc_dropout, cfg.chart_format,
     )
 
 
@@ -474,19 +494,11 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
         # ── Left panel ──────────────────────────────────────────────────
         with gr.Column(scale=2, min_width=360):
 
-            _sec("세션")
-            with gr.Group():
-                session_notes = gr.Textbox(
-                    label="연구자 메모",
-                    placeholder="연구 목적, 촬영 조건, 카메라 위치 등...",
-                    lines=2,
-                )
-                session_load = gr.File(
-                    label="세션 불러오기 (.json)",
-                    file_types=[".json"],
-                )
-
             _sec("영상 업로드")
+            gr.Markdown(
+                "처리할 동영상 파일을 선택합니다. 단일 영상 또는 배치 처리(여러 파일)를 선택할 수 있습니다.",
+                elem_classes="note",
+            )
             with gr.Tabs():
                 with gr.Tab("단일 영상"):
                     video_input = gr.Video(label="영상 파일  (MP4 / AVI / MOV)")
@@ -498,6 +510,11 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                     )
 
             _sec("기본 설정")
+            gr.Markdown(
+                "탐지·추적·예측의 핵심 파라미터입니다. YOLO 모델이 클수록 정확하지만 느려지고, "
+                "시퀀스/예측 길이는 LSTM이 보는 과거 구간과 예측할 미래 구간의 길이(프레임)입니다.",
+                elem_classes="note",
+            )
             with gr.Group():
                 yolo_model = gr.Dropdown(
                     choices=["yolo11n.pt", "yolo11s.pt", "yolo11m.pt",
@@ -532,6 +549,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
 
             # Traffic Analysis
             with gr.Accordion("교통 분석", open=False):
+                gr.Markdown(
+                    "가상 감지선 통과 계수·유량·속도 추정·OD 행렬 등 도로 교통 분석 기능을 켜고 설정합니다.",
+                    elem_classes="note",
+                )
                 enable_traffic = gr.Checkbox(label="교통 분석 활성화", value=False)
                 gr.Markdown(
                     "감지선 정의 (JSON) — 가상 루프 검지기처럼 통과 차량을 계수합니다.",
@@ -557,6 +578,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
 
             # Urban Analysis
             with gr.Accordion("도시 공간 분석", open=False):
+                gr.Markdown(
+                    "밀도 열지도와 존별 체류시간·점유율 등 도시 공간 분석 기능을 켜고 설정합니다.",
+                    elem_classes="note",
+                )
                 enable_urban = gr.Checkbox(label="도시 분석 활성화", value=False)
                 enable_heatmap = gr.Checkbox(label="밀도 열지도 생성", value=True)
                 heatmap_classes = gr.CheckboxGroup(
@@ -583,6 +608,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
 
             # Calibration
             with gr.Accordion("캘리브레이션", open=False):
+                gr.Markdown(
+                    "픽셀→실세계 거리 변환 방식을 선택합니다. '기준거리' 선택 시 교통 분석에 입력한 실거리·픽셀거리로 m/px를 자동 계산합니다.",
+                    elem_classes="note",
+                )
                 calib_mode = gr.Radio(
                     choices=["없음", "기준거리"],
                     value="없음",
@@ -591,6 +620,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                 )
 
             _sec("내보내기")
+            gr.Markdown(
+                "처리 결과를 저장할 형식을 선택합니다. CSV는 기본, Excel과 차트는 추가 분석용 보고서를 생성합니다.",
+                elem_classes="note",
+            )
             with gr.Group():
                 export_format = gr.Radio(
                     choices=["CSV만", "CSV + Excel", "CSV + Excel + 차트"],
@@ -605,6 +638,22 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                     choices=["HTML (인터랙티브)", "SVG (인쇄용)"],
                     value="HTML (인터랙티브)",
                     label="차트 형식",
+                )
+
+            _sec("세션")
+            gr.Markdown(
+                "분석 설정을 JSON으로 저장·불러와 실험을 재현합니다. 연구자 메모도 함께 기록됩니다.",
+                elem_classes="note",
+            )
+            with gr.Group():
+                session_notes = gr.Textbox(
+                    label="연구자 메모",
+                    placeholder="연구 목적, 촬영 조건, 카메라 위치 등...",
+                    lines=2,
+                )
+                session_load = gr.File(
+                    label="세션 불러오기 (.json)",
+                    file_types=[".json"],
                 )
 
         # ── Right panel ──────────────────────────────────────────────────
@@ -632,6 +681,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                 'padding:0 0 0 10px;border-left:3px solid var(--border-color-accent);'
                 'margin:16px 0 8px 0;line-height:1.5;display:block;">추적 결과</p>'
             )
+            gr.Markdown(
+                "처리 완료된 어노테이션 영상과 전체 궤적 요약 이미지입니다. 영상이 브라우저에서 바로 재생됩니다.",
+                elem_classes="note",
+            )
             with gr.Row():
                 video_output = gr.Video(label="어노테이션 영상")
                 summary_img = gr.Image(label="궤적 요약", type="filepath")
@@ -648,6 +701,13 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
             with gr.Accordion("도시 분석 결과", open=False):
                 heatmap_img_out = gr.Image(label="밀도 열지도", type="filepath")
                 zone_df_out = gr.DataFrame(label="존 분석  (체류시간 · 밀도)")
+
+            with gr.Accordion("트랙 요약", open=True):
+                gr.Markdown(
+                    "추적된 개별 객체(트랙)별 이동 경로 요약입니다. 진입·퇴장 프레임, 이동 거리, 속도를 확인할 수 있습니다.",
+                    elem_classes="note",
+                )
+                track_summary_df_out = gr.DataFrame(label="트랙별 요약")
 
             gr.HTML(
                 '<p style="font-size:14px;font-weight:700;letter-spacing:0.09em;'
@@ -668,6 +728,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                 'padding:0 0 0 10px;border-left:3px solid var(--border-color-accent);'
                 'margin:24px 0 8px 0;line-height:1.5;display:block;">배치 처리 결과</p>'
             )
+            gr.Markdown(
+                "배치 처리 시 영상별 처리 결과 요약과 전체 결과를 ZIP으로 다운로드할 수 있습니다.",
+                elem_classes="note",
+            )
             batch_summary_df_out = gr.DataFrame(label="영상별 처리 요약")
             batch_zip_download = gr.File(label="전체 결과 다운로드 (ZIP)")
 
@@ -675,6 +739,7 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
         video_output, csv_download, summary_img, status_box,
         traffic_df_out, od_df_out,
         heatmap_img_out, zone_df_out,
+        track_summary_df_out,
         excel_download, charts_download, session_download,
         batch_summary_df_out, batch_zip_download,
     ]
@@ -696,8 +761,22 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
         outputs=_all_outputs,
     )
 
+    session_load.upload(
+        fn=restore_session,
+        inputs=[session_load],
+        outputs=[
+            yolo_model, conf_thresh, seq_len, pred_len,
+            lstm_mode, class_filter, session_notes,
+            enable_traffic, counting_lines_json,
+            enable_speed, enable_od,
+            enable_urban, enable_heatmap, heatmap_classes,
+            zones_json, zone_areas_json,
+            export_format, enable_mc_dropout, chart_format,
+        ],
+    )
+
     video_input.clear(
-        fn=lambda: (None,) * 13,
+        fn=lambda: (None,) * 14,
         inputs=[],
         outputs=_all_outputs,
     )
