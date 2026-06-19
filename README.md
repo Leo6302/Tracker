@@ -130,6 +130,8 @@ Tracker/
 > 이 섹션은 의도적으로 자세하게 적혀 있습니다. 같은 프로젝트의 이전 버전(아래 변경이 아직 적용되지 않은 코드)을 가진 사람이 이 README를 Claude(또는 다른 코딩 에이전트)에게 주고
 > "이 문서대로 고쳐줘"라고 하면, 증상 → 원인 → 검증 방법 → 실제 코드까지 보고 동일한 수정을 재현할 수 있도록 정리했습니다.
 > 이미 이 코드를 그대로 받았다면 아래 내용은 모두 적용되어 있으니 참고용으로만 보면 됩니다. 파일 경로는 모두 `Tracker/` 기준입니다.
+>
+> **정리 원칙**: 같은 기능이 여러 차례 수정된 경우(최초 구현 → 추가 버그 발견 → 재수정), 각 시도를 별도 항목으로 나열하지 않고 **하나의 항목에 최종 상태만** 기록합니다. 중간에 폐기된 코드(예: 나중에 다른 구현으로 전면 교체된 버전)는 보여주지 않고, 무엇이 왜 바뀌었는지만 짧게 요약합니다 — 그래야 이 문서를 따라가는 코딩 에이전트가 이미 틀린 것으로 판명된 중간 버전을 굳이 구현했다가 다시 고치는 일이 없습니다. 다만 "원인이 하나가 아니었다"는 사실 자체는 디버깅 맥락으로 유용하므로, 그런 경우는 한 항목 안에 "원인 1/2/3"처럼 모아 적습니다. 각 항목의 **출력 개수(`process_videos`의 반환 튜플 길이 등)는 항목을 순서대로 적용했을 때의 누적 값**이므로, 중간 항목을 건너뛰면 개수가 맞지 않습니다.
 
 ---
 
@@ -327,17 +329,22 @@ session_load.upload(
 
 ### 10. 교통 분석 결과가 숫자 테이블만 있어 한눈에 파악이 어려움
 
-- **증상**: 처리 후 "교통 분석 결과" 아코디언을 열면 숫자가 채워진 DataFrame 테이블(감지선·클래스·통과수·유량·차두시간·속도 등)만 표시됨. 여러 클래스 간 통과 수 크기 차이, 속도 분포의 이상치 유무 같은 정보를 눈으로 파악하려면 숫자를 하나씩 읽어야 했음. 내보내기에서 "CSV + Excel + 차트"를 선택하면 별도 HTML 파일로 Plotly 차트가 생성되긴 했지만 파일을 따로 열어야 했음.
+- **증상**: 처리 후 "교통 분석 결과" 아코디언을 열면 숫자가 채워진 DataFrame 테이블(감지선·클래스·통과수·유량·차두시간·속도 등)만 표시됨. 여러 클래스 간 통과 수 크기 차이, 속도 분포의 이상치 유무 같은 정보를 눈으로 파악하려면 숫자를 하나씩 읽어야 했음.
 - **원인**: `process_videos()`가 `traffic_df`, `speed_df`를 `pd.DataFrame`으로 만들어 `gr.DataFrame` 컴포넌트에 반환. 결과 화면에서 차트를 렌더링하는 코드가 없었음.
-- **해결**: 두 개의 matplotlib 차트 생성 함수를 추가하고 `gr.DataFrame` 출력을 `gr.Plot` 출력 두 개로 교체.
+- **해결**: 두 개의 차트 생성 함수를 추가하고 `gr.DataFrame` 출력을 `gr.Plot` 출력 두 개로 교체.
 
-**추가 함수 1 — 통과 수 · 유량 막대 차트**:
+> **이력**: 최초에는 matplotlib으로 구현했으나, 실제 화면에서 ① 한글이 모두 □□□ 박스 문자로 깨짐(시스템에 한글 폰트를 못 찾음), ② 속도 박스플롯에서 이상치 마커가 겹쳐 고리·도넛 모양으로 보임, ③ 정적 PNG라 호버 시 정확한 수치가 안 나옴 — 세 가지 문제가 발견되어 **즉시 Plotly로 전면 교체**했음. 아래는 그 최종(Plotly) 버전만 기록한다.
+
+**함수 1 — 통과 수 · 유량 막대 차트**:
 
 ```python
-# app.py — _update_monitor() 이후에 추가
+# app.py — _resolve_file_paths() 이후에 추가
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 
 def _make_traffic_count_chart(counting_data):
-    """감지선별 클래스 통과 수·유량 그룹 막대 차트를 matplotlib Figure로 반환."""
+    """Grouped bar chart (Plotly): per-class count and flow rate per counting line."""
     if not counting_data:
         return None
     all_cls = sorted({cls for line in counting_data for cls in line.get('counts', {})})
@@ -345,45 +352,54 @@ def _make_traffic_count_chart(counting_data):
         return None
 
     n_lines = len(counting_data)
-    n_cls = len(all_cls)
-    x = np.arange(n_cls)
-    width = min(0.6 / max(n_lines, 1), 0.35)
-    palette = [plt.cm.tab10(i / 10) for i in range(n_lines)]
+    colors = px.colors.qualitative.Set1
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=['클래스별 통과 수', '클래스별 유량 (대/시)'],
+        horizontal_spacing=0.12,
+    )
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(8, n_cls * 2 + 3), 4))
     for i, line in enumerate(counting_data):
         lbl = line.get('label', f'Line {i+1}')
-        offset = (i - (n_lines - 1) / 2) * width
         counts = [line.get('counts', {}).get(cls, 0) for cls in all_cls]
-        flows  = [line.get('flow_rates_veh_hr', {}).get(cls, 0) for cls in all_cls]
-        ax1.bar(x + offset, counts, width, label=lbl, color=palette[i], alpha=0.85)
-        ax2.bar(x + offset, flows,  width, label=lbl, color=palette[i], alpha=0.85)
+        flows = [line.get('flow_rates_veh_hr', {}).get(cls, 0) for cls in all_cls]
+        color = colors[i % len(colors)]
 
-    for ax, title, ylabel in [
-        (ax1, '클래스별 통과 수', '통과 수'),
-        (ax2, '클래스별 유량 (대/시)', '유량 (대/시)'),
-    ]:
-        ax.set_xticks(x)
-        ax.set_xticklabels(all_cls, rotation=15, ha='right', fontsize=9)
-        ax.set_ylabel(ylabel, fontsize=9)
-        ax.set_title(title, fontsize=10, fontweight='bold')
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3, axis='y')
-        for spine in ('top', 'right'):
-            ax.spines[spine].set_visible(False)
-    fig.tight_layout()
+        fig.add_trace(go.Bar(
+            name=lbl, x=all_cls, y=counts,
+            marker_color=color, legendgroup=lbl,
+            hovertemplate='<b>%{x}</b><br>통과 수: <b>%{y}</b><extra>' + lbl + '</extra>',
+        ), row=1, col=1)
+
+        fig.add_trace(go.Bar(
+            name=lbl, x=all_cls, y=[round(v, 1) for v in flows],
+            marker_color=color, legendgroup=lbl, showlegend=False,
+            hovertemplate='<b>%{x}</b><br>유량: <b>%{y:.1f}</b> 대/시<extra>' + lbl + '</extra>',
+        ), row=1, col=2)
+
+    fig.update_layout(
+        barmode='group',
+        height=420,
+        legend_title_text='감지선',
+        yaxis_title='통과 수',
+        yaxis2_title='유량 (대/시)',
+        template='plotly_white',
+        hovermode='x unified',
+        margin=dict(t=60, b=50, l=60, r=20),
+    )
+    fig.update_xaxes(tickangle=-20)
     return fig
 ```
 
-**추가 함수 2 — 속도 분포 박스플롯**:
+**함수 2 — 속도 분포 박스플롯**:
 
 ```python
 def _make_speed_chart(speed_data):
-    """클래스별 속도 분포 박스플롯을 matplotlib Figure로 반환 (원시 트랙 샘플 사용)."""
+    """Box plot (Plotly): speed distribution per class using raw track samples."""
     if not speed_data:
         return None
     track_speeds = speed_data.get('track_speeds', {})
-    track_cls    = speed_data.get('track_cls', {})
+    track_cls = speed_data.get('track_cls', {})
     if not track_speeds:
         return None
 
@@ -396,23 +412,29 @@ def _make_speed_chart(speed_data):
     if not labels:
         return None
 
-    fig, ax = plt.subplots(figsize=(max(4, len(labels) * 1.8 + 2), 4))
-    palette = [plt.cm.tab10(i / 10) for i in range(len(labels))]
-    bp = ax.boxplot(
-        [by_class[cls] for cls in labels],
-        labels=labels, patch_artist=True,
-        medianprops={'color': '#c0392b', 'linewidth': 2},
-        flierprops={'marker': 'o', 'markersize': 3, 'alpha': 0.5},
-    )
-    for patch, color in zip(bp['boxes'], palette):
-        patch.set_facecolor(color); patch.set_alpha(0.7)
+    colors = px.colors.qualitative.Set1
+    fig = go.Figure()
+    for i, cls in enumerate(labels):
+        color = colors[i % len(colors)]
+        fig.add_trace(go.Box(
+            y=by_class[cls],
+            name=cls,
+            marker_color=color,
+            boxpoints='outliers',   # 이상치만 개별 점으로 표시 — 겹침 고리 없음
+            marker_size=4,
+            line_width=2,
+            hovertemplate='속도: <b>%{y:.1f}</b> km/h<extra>' + cls + '</extra>',
+        ))
 
-    ax.set_ylabel('속도 (km/h)', fontsize=9)
-    ax.set_title('클래스별 속도 분포', fontsize=10, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
-    for spine in ('top', 'right'):
-        ax.spines[spine].set_visible(False)
-    fig.tight_layout()
+    fig.update_layout(
+        title='클래스별 속도 분포',
+        yaxis_title='속도 (km/h)',
+        height=420,
+        showlegend=False,
+        template='plotly_white',
+        hovermode='closest',
+        margin=dict(t=60, b=50, l=60, r=20),
+    )
     return fig
 ```
 
@@ -467,262 +489,40 @@ _all_outputs = [
 ```
 
 - **주의 (재현 시 흔히 빠지는 함정)**:
-  - `_make_traffic_count_chart`와 `_make_speed_chart`는 `matplotlib.use('Agg')` 이후에 정의해야 함 (이미 파일 상단에 `matplotlib.use('Agg')`가 있으면 OK). 백엔드를 Agg로 고정하지 않으면 서버 환경에서 `cannot connect to X server` 에러가 날 수 있음.
+  - Plotly Figure를 반환해도 `gr.Plot` 컴포넌트는 그대로 사용 가능(matplotlib Figure와 Plotly Figure를 모두 지원) — 컴포넌트 타입 변경은 필요 없음. `make_subplots`의 `subplot_titles`에 한글을 넣어도 브라우저가 직접 렌더링하므로 폰트 설정이 전혀 필요 없음.
+  - `legendgroup=lbl`과 `showlegend=False`를 두 번째 서브플롯 트레이스에 설정하는 것이 핵심 — 빠뜨리면 같은 감지선 이름이 범례에 2번 나타남.
+  - `hovertemplate` 안의 `%{y}`, `%{x}`는 Plotly 템플릿 변수이므로 Python f-string으로 만들면 안 됨. `<extra>...</extra>` 태그는 호버 상자의 오른쪽 파란 레이블(트레이스 이름)을 커스텀하는 Plotly 문법.
   - 반환 타입이 `None`인 경우(`counting_data`가 비어있는 등)에도 `gr.Plot`은 조용히 빈 상태로 표시됨 — 별도 처리 불필요.
   - 출력 개수가 14 → 15개로 늘었으므로, 조기 반환 경로(`"영상을 먼저 업로드해주세요"`)와 `video_input.clear()`의 자리 채우기도 같이 늘려야 함:
     - 조기 반환: `(None, None, None, "영상을 먼저 업로드해주세요.") + (None,) * 11`  (10 → 11)
     - clear: `fn=lambda: (None,) * 15`  (14 → 15)
-  - `import numpy as np`를 `app.py` 최상단에 추가해야 함 (`np.arange`, `plt.cm.tab10` 등이 차트 함수에서 사용됨).
 - **파일**: `app.py`
 
-#### 후속 수정 — 한글 깨짐·고리 아티팩트·호버 툴팁 문제로 matplotlib → Plotly 전환
-
-> 항목 10에서 구현한 matplotlib 차트에서 세 가지 추가 문제가 발견되어 두 함수를 Plotly로 교체.
-
-- **증상 1 — 한글 깨짐**: "클래스별 통과 수", "통과 수", "유량 (대/시)", "속도 (km/h)", "클래스별 속도 분포" 등 차트 제목·축 레이블에 한글이 모두 □□□ 박스 문자로 표시됨.
-- **증상 2 — 고리 아티팩트**: 속도 분포 박스플롯에서 일부 클래스(예: bus)의 박스 상단에 여러 개의 이상치(outlier) 마커가 겹쳐 쌓여 고리·도넛 모양의 시각적 잡음이 발생함.
-- **증상 3 — 제한적 정보**: 차트 위에 커서를 올려도 정확한 수치(통과 수, 유량 값, 속도 값)가 표시되지 않고 matplotlib 기본 좌표값만 나오거나 아무것도 표시되지 않음.
-- **원인**: 세 증상 모두 matplotlib 백엔드에서 정적 PNG 이미지로 렌더링하기 때문에 발생.
-  1. matplotlib은 시스템에서 한글 폰트를 자동으로 찾지 못해 박스 문자로 대체.
-  2. matplotlib `ax.boxplot`의 `flierprops` 마커들이 같은 y값 근처에 수천 개 겹치면 겹침 효과로 고리처럼 보임.
-  3. PNG 이미지는 호버 인터랙션이 없음 — `gr.Plot`이 matplotlib Figure를 PNG로 인코딩해 표시하므로 어떤 인터랙션도 불가.
-- **해결**: `_make_traffic_count_chart`와 `_make_speed_chart` 두 함수를 matplotlib → **Plotly**로 교체. `gr.Plot` 컴포넌트는 matplotlib Figure와 Plotly Figure를 모두 지원하므로 출력 위젯 타입은 변경 불필요. Plotly는 브라우저에서 렌더링하므로 한글 자동 지원, 이상치 처리 방식이 다름(개별 점), 호버 툴팁 네이티브 지원.
-
-**임포트 추가** — `app.py` 상단의 matplotlib 임포트 바로 아래에:
-
-```python
-# app.py
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-# ↓ 아래 3줄 추가
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-```
-
-**교체 함수 1 — 통과 수 · 유량 막대 차트 (Plotly 버전)**:
-
-```python
-# app.py — _make_traffic_count_chart 전체를 아래로 교체
-def _make_traffic_count_chart(counting_data):
-    """감지선별 클래스 통과 수·유량 그룹 막대 차트 (Plotly, 인터랙티브)."""
-    if not counting_data:
-        return None
-    all_cls = sorted({cls for line in counting_data for cls in line.get('counts', {})})
-    if not all_cls:
-        return None
-
-    n_lines = len(counting_data)
-    colors = px.colors.qualitative.Set1
-    fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=['클래스별 통과 수', '클래스별 유량 (대/시)'],
-        horizontal_spacing=0.12,
-    )
-
-    for i, line in enumerate(counting_data):
-        lbl = line.get('label', f'Line {i+1}')
-        counts = [line.get('counts', {}).get(cls, 0) for cls in all_cls]
-        flows = [line.get('flow_rates_veh_hr', {}).get(cls, 0) for cls in all_cls]
-        color = colors[i % len(colors)]
-
-        fig.add_trace(go.Bar(
-            name=lbl, x=all_cls, y=counts,
-            marker_color=color, legendgroup=lbl,
-            hovertemplate='<b>%{x}</b><br>통과 수: <b>%{y}</b><extra>' + lbl + '</extra>',
-        ), row=1, col=1)
-
-        fig.add_trace(go.Bar(
-            name=lbl, x=all_cls, y=[round(v, 1) for v in flows],
-            marker_color=color, legendgroup=lbl, showlegend=False,
-            hovertemplate='<b>%{x}</b><br>유량: <b>%{y:.1f}</b> 대/시<extra>' + lbl + '</extra>',
-        ), row=1, col=2)
-
-    fig.update_layout(
-        barmode='group',
-        height=420,
-        legend_title_text='감지선',
-        yaxis_title='통과 수',
-        yaxis2_title='유량 (대/시)',
-        template='plotly_white',
-        hovermode='x unified',
-        margin=dict(t=60, b=50, l=60, r=20),
-    )
-    fig.update_xaxes(tickangle=-20)
-    return fig
-```
-
-**교체 함수 2 — 속도 분포 박스플롯 (Plotly 버전)**:
-
-```python
-# app.py — _make_speed_chart 전체를 아래로 교체
-def _make_speed_chart(speed_data):
-    """클래스별 속도 분포 박스플롯 (Plotly, 인터랙티브)."""
-    if not speed_data:
-        return None
-    track_speeds = speed_data.get('track_speeds', {})
-    track_cls = speed_data.get('track_cls', {})
-    if not track_speeds:
-        return None
-
-    by_class: dict = {}
-    for tid, speeds in track_speeds.items():
-        cls = track_cls.get(tid) or track_cls.get(str(tid), 'unknown')
-        by_class.setdefault(cls, []).extend(speeds)
-
-    labels = [cls for cls in sorted(by_class) if len(by_class[cls]) >= 2]
-    if not labels:
-        return None
-
-    colors = px.colors.qualitative.Set1
-    fig = go.Figure()
-    for i, cls in enumerate(labels):
-        color = colors[i % len(colors)]
-        fig.add_trace(go.Box(
-            y=by_class[cls],
-            name=cls,
-            marker_color=color,
-            boxpoints='outliers',   # 이상치만 개별 점으로, 겹침 고리 없음
-            marker_size=4,
-            line_width=2,
-            hovertemplate='속도: <b>%{y:.1f}</b> km/h<extra>' + cls + '</extra>',
-        ))
-
-    fig.update_layout(
-        title='클래스별 속도 분포',
-        yaxis_title='속도 (km/h)',
-        height=420,
-        showlegend=False,
-        template='plotly_white',
-        hovermode='closest',
-        margin=dict(t=60, b=50, l=60, r=20),
-    )
-    return fig
-```
-
-- **주의 (재현 시 흔히 빠지는 함정)**:
-  - matplotlib 차트 함수 내에서 `import numpy as np`와 `plt.cm.tab10`을 사용하던 코드는 Plotly 버전에서 완전히 삭제됨. `np`가 파일 다른 곳에서도 쓰인다면 상단 `import numpy as np`는 그대로 유지.
-  - `make_subplots`의 `subplot_titles`에 한글을 넣어도 브라우저에서 정상 렌더링. matplotlib과 달리 폰트 설정 없음.
-  - `legendgroup=lbl`과 `showlegend=False`를 두 번째 서브플롯 트레이스에 설정하는 것이 핵심 — 그렇지 않으면 같은 감지선 이름이 범례에 2번 나타남.
-  - Plotly Figure를 반환해도 `gr.Plot` 컴포넌트는 그대로 사용 가능 (별도 컴포넌트 타입 변경 불필요).
-  - `hovertemplate` 안의 `%{y}`, `%{x}` 는 Plotly 템플릿 변수이므로 Python f-string으로 만들면 안 됨. `<extra>...</extra>` 태그는 호버 상자의 오른쪽 파란 레이블(트레이스 이름) 을 커스텀하는 Plotly 문법.
-- **파일**: `app.py`
+---
 
 ### 11. 처리 결과가 숫자·차트뿐이라 패턴 해석은 전부 사용자가 직접 해야 함
 
-- **증상**: "교통 분석 결과"/"도시 분석 결과"/"트랙 요약" 아코디언에 차트와 표는 풍부하지만, "이 영상에서 무슨 일이 있었는지"를 문장으로 설명해주는 기능이 없어 숫자를 사람이 직접 종합해야 했음.
-- **원인**: 기존 코드에는 LLM/외부 API 호출이 전혀 없음(`requirements.txt`에 `anthropic`/`openai` 등 없음).
-- **해결**: Claude API(Anthropic SDK)를 호출해 분석 결과를 한국어로 해설하는 기능을 추가. 매 처리마다 자동으로 비용이 발생하지 않도록 **별도 버튼**("AI 인사이트 생성")으로만 호출되며, API 키는 `.env`/환경변수(`ANTHROPIC_API_KEY`)에서만 읽고 UI나 세션 파일에는 절대 저장하지 않음.
+- **증상**: "교통 분석 결과"/"도시 분석 결과"/"트랙 요약" 아코디언에 차트와 표는 풍부하지만, "이 영상에서 무슨 일이 있었는지"를 문장으로 설명해주는 기능이 없어 숫자를 사람이 직접 종합해야 했음. 또한 API 키가 없거나 Claude 계정이 없는 사용자는 기능 자체를 못 쓰고, 해설이 차트·표와 분리된 텍스트 블록뿐이라 어떤 데이터가 왜 주목할 만한지 시각적으로 드러나지 않았음.
+- **원인**: 기존 코드에는 LLM/외부 API 호출이 전혀 없음(`requirements.txt`에 `anthropic` 등 없음).
+- **해결**: Claude API(Anthropic SDK)를 호출해 분석 결과를 한국어로 해설하는 **AI 인사이트** 기능을 추가. 매 처리마다 자동으로 비용이 발생하지 않도록 **별도 버튼**으로만 호출하고, ① Claude를 구조화 출력으로 호출해 해설 텍스트와 "차트·표에 표시할 메모(하이라이트)"를 함께 받고, ② API 키를 UI에서 직접 입력 가능하게 하며(세션 동안만 유지, `.env` 값은 폴백), ③ 키 없이도 쓸 수 있는 **로컬 Ollama**를 두 번째 제공자로 추가.
 
-**신규 파일 — `src/analysis/ai_insight.py`**: `last_analysis`/`last_result`에서 LLM에 보낼 작은 JSON 요약을 만드는 `build_analysis_summary()`와, Claude API를 호출하는 `generate_insight()`로 구성.
+> **이력**: 이 기능은 한 번에 지금 형태로 만들어지지 않았다. ① 최초 버전은 Claude 단일 제공자 + 일반 텍스트 반환 + 단일 클릭 버튼이었고, ② 이후 Claude 구조화 출력(`highlights`) + 로컬 Ollama 제공자 + UI API 키 입력으로 확장되었고, ③ 배포 직후 다크 테마에서 하이라이트 행 글자가 안 보이는 버그와 AI 인사이트가 "트랙 요약" 아코디언에 묻혀 있던 레이아웃 문제가 발견되어 즉시 수정되었고, ④ 생성 중 버튼을 다시 누르면 요청이 중첩되는 문제가 발견되어 버튼을 일시 비활성화하는 처리가 추가되었다. 아래는 그 모든 과정을 거친 **최종 코드만** 기록한다.
+
+**신규 파일 — `src/analysis/ai_insight.py`**: `last_analysis`/`last_result`에서 LLM에 보낼 작은 JSON 요약을 만드는 `build_analysis_summary()`와, LLM을 호출하는 `generate_insight()`(provider에 따라 `_generate_with_claude`/`_generate_with_ollama`로 분기)로 구성.
 
 ```python
 # src/analysis/ai_insight.py
 DEFAULT_MODEL = "claude-sonnet-4-6"
 MODEL_CHOICES = ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"]
-MAX_TOKENS = 2048
+MAX_TOKENS = 3072   # report_markdown + highlights JSON을 함께 받으므로 여유 있게 설정
 
-class AIInsightError(Exception):
-    """사용자에게 그대로 보여줄 수 있는 실패(키 누락/인증/한도/네트워크/거부)."""
-
-def generate_insight(summary, model=DEFAULT_MODEL, api_key=None):
-    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise AIInsightError("ANTHROPIC_API_KEY가 설정되지 않았습니다. ...")
-    import anthropic  # 지연 임포트 — 선택적 의존성으로 취급
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=model, max_tokens=MAX_TOKENS,
-        system=_build_system_prompt(summary),
-        messages=[{"role": "user", "content": _build_user_message(summary)}],
-    )
-    # AuthenticationError/RateLimitError/APIStatusError/APIConnectionError →
-    # 각각 한국어 AIInsightError로 변환, stop_reason == "refusal"과 빈 응답도 처리
-    ...
-```
-
-**데이터 축소 전략** — 영상 길이에 비례해 무한정 늘어나는 원시 필드는 절대 그대로 보내지 않고, 이미 집계된 통계만 전달:
-
-| 원본 필드 | 보내는 것 | 버리는 것 |
-|---|---|---|
-| `counting_lines` | `counts`, `flow_rates_veh_hr`, `headway`, `total_crossings`(계산) | `crossings`(통과마다 1건) |
-| `speed` | `per_class`(클래스별 percentile 통계) | `track_speeds`, `track_cls`(트랙별 원시 샘플) |
-| `od_matrix` | `matrix_df` → `{origin: {dest: count}}` | `raw`(튜플 키, JSON 불가) |
-| `zone_analysis` | `zone_summaries` | `dwell_records`, `occupancy_timeseries`(초당 1건) |
-| `track_summary` | 클래스별 집계(`count`, `mean_duration_frames`, `mean_distance`, `mean_speed_kmh`) | 트랙별 원시 행 전체(수백 개일 수 있음) |
-| `congestion` | `events`(긴 순 상위 10개) + `total_events` | — |
-
-`enabled_flags`(`enable_traffic`/`enable_speed`/`enable_od`/`enable_urban`)는 `last_analysis`에서 역추론하지 않고 `process_videos()`의 기존 로컬 변수를 그대로 전달 — 토글 OFF와 "토글 ON이지만 결과 0"은 `last_analysis` 모양만으로 구분 불가능하기 때문. `_build_system_prompt()`는 `summary`에 실제로 존재하는 키만 보고 리포트 섹션(교통 흐름/혼잡 구간/속도 분포/OD 흐름/존별 특이사항)을 동적으로 구성하며, "데이터에 없는 수치를 추측·생성하지 말 것"이라는 환각 방지 지침을 반드시 포함.
-
-**`app.py` 변경 — `process_videos()` 출력 개수 15 → 16**:
-
-```python
-# process_videos() 끝, 최종 return 직전에 추가
-enabled_flags = {
-    "enable_traffic": bool(enable_traffic),
-    "enable_speed": bool(enable_speed) and scale_mpp is not None,
-    "enable_od": bool(enable_od),
-    "enable_urban": bool(enable_urban),
-}
-ai_summary = build_analysis_summary(last_analysis, last_result, enabled_flags)
-# return (..., batch_zip_path, ai_summary)   ← 맨 끝에 한 개 추가
-```
-
-출력 개수가 늘었으므로 아래 세 곳을 함께 수정해야 함:
-- 조기 반환(`"영상을 먼저 업로드해주세요"`): `(None,) * 11` → `(None,) * 12`
-- `_all_outputs` 리스트 끝에 `ai_insight_state`(새 `gr.State(value=None)`) 추가
-- `video_input.clear(fn=lambda: (None,) * 15, ...)` → `(None,) * 16`
-
-**`app.py` 변경 — UI 위젯 및 클릭 핸들러** ("트랙 요약" 아코디언 안, `track_summary_df_out` 바로 다음):
-
-```python
-with gr.Row():
-    ai_model_dropdown = gr.Dropdown(choices=MODEL_CHOICES, value=DEFAULT_MODEL,
-                                     label="Claude 모델", scale=2)
-    ai_insight_btn = gr.Button("AI 인사이트 생성", variant="secondary", scale=1)
-ai_insight_output = gr.Markdown(value="", elem_classes="note")
-ai_insight_state = gr.State(value=None)
-```
-
-```python
-def run_ai_insight(ai_summary, model):
-    if not ai_summary:
-        gr.Warning("먼저 영상을 처리해주세요. 분석 결과가 없습니다.")
-        return gr.skip()
-    try:
-        return generate_insight(ai_summary, model=model)
-    except AIInsightError as e:
-        gr.Warning(str(e))
-        return gr.skip()
-
-ai_insight_btn.click(fn=run_ai_insight, inputs=[ai_insight_state, ai_model_dropdown],
-                      outputs=[ai_insight_output])
-```
-
-`gr.Markdown`을 출력 컴포넌트로 쓴 이유는 Claude 응답의 `##` 헤더·불릿이 `gr.Textbox`에서는 `#`/`-` 글자 그대로 보이기 때문(Markdown은 실제 HTML로 렌더링). `gr.Warning` + `gr.skip()` 조합은 키 누락·인증 실패·한도 초과 등 예상 가능한 실패에서 토스트만 띄우고 이전 결과를 지우지 않기 위함 — `AIInsightError`가 아닌 예외(진짜 버그)는 잡지 않고 그대로 전파됨.
-
-- **주의 (재현 시 흔히 빠지는 함정)**:
-  - `ANTHROPIC_API_KEY`는 **반드시** `.env` 파일(`.gitignore`에 이미 포함됨) 또는 OS 환경변수로만 설정. `SessionConfig`(세션 JSON)에는 절대 추가하지 말 것 — 세션 파일을 공유하면 키가 새어나갈 수 있음. (※ 항목 12에서 UI 입력 필드가 추가되지만, 그 값은 브라우저 세션 동안만 유지되고 디스크에는 쓰지 않음 — 이 원칙은 유지됨)
-  - `app.py` 상단에 `from dotenv import load_dotenv; load_dotenv()`를 다른 임포트보다 먼저 실행해야 `ANTHROPIC_API_KEY`가 `generate_insight()` 호출 시점에 채워져 있음.
-  - 출력 개수 15 → 16 변경은 **세 곳**(최종 `return` 튜플, `_all_outputs` 리스트, `video_input.clear()`의 `(None,) * N`)을 모두 같이 고쳐야 함. 하나라도 빠뜨리면 Gradio가 "Number of output components does not match" 에러를 던짐. `restore_session()`의 `(gr.skip(),) * 68`은 입력 위젯만 다루므로 영향 없음.
-  - `track_summary`는 트랙별 원시 행이 아니라 **클래스별 집계**(`_summarize_track_summary`)만 LLM에 전달됨 — 추적 객체가 수백 개여도 전송량은 클래스 수(보통 2~5개)만큼만 늘어남.
-  - `anthropic` 패키지는 `generate_insight()` 내부에서 지연 임포트(`import anthropic`)됨 — 설치가 안 돼 있어도 앱 시작 자체는 깨지지 않고, 버튼을 눌렀을 때만 에러가 남.
-  - `thinking`/`output_config.effort`는 의도적으로 사용하지 않음 — 이미 집계된 1~5KB JSON을 요약하는 단발성 작업이라 추론 단계가 품질에 도움이 되지 않고, 비용·지연만 늘어남.
-- **파일**: `requirements.txt`, `src/analysis/ai_insight.py` (신규), `app.py`
-
-### 12. AI 인사이트가 텍스트로만 분리돼 있고, Claude 계정 없는 사용자는 기능을 못 씀
-
-- **증상 1 — 차트/표와 분리된 해설**: 항목 11에서 추가한 AI 인사이트는 단일 마크다운 텍스트 블록뿐이라, 어떤 데이터가 왜 주목할 만한지가 차트·표 위에서는 전혀 드러나지 않음.
-- **증상 2 — Claude API 키 필수**: API 키가 없거나 Claude 계정이 없는 사용자는 기능 자체를 쓸 수 없음. `.env` 파일을 직접 편집해야 하는 것도 진입장벽.
-- **해결**: ① Claude를 **구조화 출력**(`output_config.format` JSON 스키마)으로 호출해 `report_markdown`(기존과 동일한 전체 해설)과 `highlights`(차트·표에 표시할 메모 배열)를 함께 받음. ② API 키를 UI에서 직접 입력할 수 있는 비밀번호 필드 추가(세션 동안만 유지, `.env` 값은 폴백). ③ **로컬 Ollama**를 두 번째 AI 제공자로 추가해 키 없이도 기능을 쓸 수 있게 함(텍스트 리포트만, 하이라이트는 Claude 전용).
-
-**`src/analysis/ai_insight.py` — `generate_insight()` 반환 타입 변경(str → dict)**:
-
-```python
 DEFAULT_OLLAMA_MODEL = "exaone3.5:7.8b"   # LG AI연구원, 한국어/영어 이중언어, 4.8GB
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
-MAX_TOKENS = 3072  # 기존 2048 → highlights JSON 포함 여유분
+
+_CATEGORY_LABELS = {
+    "counting_lines": "교통", "speed": "속도", "zone_analysis": "존",
+    "od_matrix": "OD", "congestion": "혼잡", "track_summary": "트랙",
+}
 
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -733,10 +533,7 @@ OUTPUT_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "category": {"type": "string", "enum": [
-                        "counting_lines", "speed", "zone_analysis",
-                        "od_matrix", "congestion", "track_summary",
-                    ]},
+                    "category": {"type": "string", "enum": list(_CATEGORY_LABELS)},
                     "target": {"type": "string"},   # 데이터에 실제로 존재하는 라벨(클래스명/존 이름 등)
                     "note": {"type": "string"},
                     "importance": {"type": "string", "enum": ["high", "medium"]},
@@ -750,25 +547,136 @@ OUTPUT_SCHEMA = {
     "additionalProperties": False,
 }
 
+
+class AIInsightError(Exception):
+    """사용자에게 그대로 보여줄 수 있는 실패(키 누락/인증/한도/네트워크/거부).
+
+    app.py는 이 예외만 gr.Warning으로 변환하고, 그 외 예외는 버그로 취급해 그대로 전파한다.
+    """
+
+
 def generate_insight(summary, provider="claude", *, model=DEFAULT_MODEL, api_key=None,
                       ollama_model=DEFAULT_OLLAMA_MODEL, ollama_host=DEFAULT_OLLAMA_HOST) -> dict:
+    """provider="claude"면 구조화 출력으로 {"report_markdown", "highlights"}를 받고,
+    provider="ollama"면 로컬 서버에서 텍스트 리포트만 받는다(highlights는 항상 []).
+    두 경로 모두 같은 모양의 dict를 반환한다."""
     if provider == "ollama":
         return _generate_with_ollama(summary, ollama_model, ollama_host)
     return _generate_with_claude(summary, model, api_key)
+
+
+def _generate_with_claude(summary, model, api_key) -> dict:
+    import os
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise AIInsightError(
+            "Anthropic API 키가 없습니다. 위 'Anthropic API 키' 입력란에 붙여넣거나 "
+            ".env 파일에 ANTHROPIC_API_KEY=sk-ant-... 를 추가한 뒤 다시 시도해주세요."
+        )
+    import anthropic  # 지연 임포트: 선택적 의존성으로 취급 — 미설치 시 앱 시작은 깨지지 않음
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        response = client.messages.create(
+            model=model, max_tokens=MAX_TOKENS,
+            system=_build_structured_system_prompt(summary),
+            messages=[{"role": "user", "content": _build_user_message(summary)}],
+            output_config={"format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
+        )
+    except anthropic.AuthenticationError:
+        raise AIInsightError("Claude API 인증에 실패했습니다. API 키가 올바른지 확인해주세요.")
+    except anthropic.RateLimitError:
+        raise AIInsightError("Claude API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.")
+    except anthropic.APIStatusError as e:
+        raise AIInsightError(f"Claude API 오류가 발생했습니다 (status={e.status_code}).")
+    except anthropic.APIConnectionError:
+        raise AIInsightError("Claude API 서버에 연결할 수 없습니다. 네트워크를 확인해주세요.")
+
+    if response.stop_reason == "refusal":
+        raise AIInsightError("Claude가 이 요청에 대한 응답을 거부했습니다.")
+    text = next((b.text for b in response.content if b.type == "text"), "")
+    if not text:
+        raise AIInsightError("Claude로부터 빈 응답을 받았습니다.")
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        raise AIInsightError("Claude 응답을 해석할 수 없습니다. 다시 시도해주세요.")
+    result.setdefault("highlights", [])
+    return result
+
+
+def _generate_with_ollama(summary, model, host) -> dict:
+    import httpx  # anthropic의 전이 의존성으로 이미 설치돼 있음 — 새 의존성 없음
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _build_text_system_prompt(summary)},  # JSON 강제 없는 일반 텍스트 프롬프트
+            {"role": "user", "content": _build_user_message(summary)},
+        ],
+        "stream": False,
+    }
+    try:
+        resp = httpx.post(f"{host.rstrip('/')}/api/chat", json=payload, timeout=120.0)
+    except httpx.ConnectError:
+        raise AIInsightError(f"로컬 Ollama 서버({host})에 연결할 수 없습니다. Ollama를 설치·실행한 뒤 다시 시도해주세요.")
+    except httpx.TimeoutException:
+        raise AIInsightError("Ollama 응답 시간이 초과되었습니다. 더 작은 모델을 사용해보세요.")
+
+    if resp.status_code == 404:
+        raise AIInsightError(f"Ollama 모델 '{model}'을 찾을 수 없습니다. `ollama pull {model}` 실행 후 다시 시도해주세요.")
+    if resp.status_code != 200:
+        raise AIInsightError(f"Ollama 오류가 발생했습니다 (status={resp.status_code}).")
+
+    text = (resp.json().get("message") or {}).get("content", "").strip()
+    if not text:
+        raise AIInsightError("Ollama로부터 빈 응답을 받았습니다.")
+    return {"report_markdown": text, "highlights": []}   # highlights는 항상 빈 리스트 — Claude 전용
+
+
+def render_insight_markdown(result: dict) -> str:
+    """highlights가 있으면(Claude 경로) 맨 위에 강조점 블록을 추가하고, 없으면(Ollama 경로,
+    또는 Claude가 하이라이트를 찾지 못한 경우) report_markdown만 그대로 반환한다."""
+    highlights = result.get("highlights") or []
+    report = result.get("report_markdown", "")
+    if not highlights:
+        return report
+    lines = ["## 🔍 주목할 포인트 (연구 방향성 힌트)", ""]
+    for h in sorted(highlights, key=lambda h: 0 if h.get("importance") == "high" else 1):
+        mark = "🔴" if h.get("importance") == "high" else "🔵"
+        label = _CATEGORY_LABELS.get(h.get("category"), h.get("category", ""))
+        lines.append(f"- {mark} **[{label}] {h.get('target', '')}** — {h.get('note', '')}")
+    lines.append("\n---\n")
+    return "\n".join(lines) + report
 ```
 
-Claude 경로는 `output_config={"format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}}`을 붙여 응답이 항상 스키마를 만족하는 JSON임을 보장받고 `json.loads()`만 함. Ollama 경로(`httpx.post(f"{host}/api/chat", json={...}, timeout=120.0)`)는 JSON 강제 없이 같은 섹션 구성의 마크다운 텍스트만 요청하고 `highlights`는 항상 `[]`로 채워 반환 모양을 통일함(`anthropic`의 전이 의존성으로 이미 설치돼 있던 `httpx`를 그대로 재사용 — 새 의존성 없음).
+`_build_structured_system_prompt(summary)`/`_build_text_system_prompt(summary)`는 `summary`에 실제로 존재하는 키만 보고 리포트 섹션(교통 흐름/혼잡 구간/속도 분포/OD 흐름/존별 특이사항/트랙 요약/권장사항)을 동적으로 구성하며, "데이터에 없는 수치를 추측·생성하지 말 것"이라는 환각 방지 지침을 반드시 포함한다. Claude용 프롬프트에는 추가로 "highlights 배열에는 데이터에 실제로 존재하는 라벨만 정확히 사용해 가장 주목할 만한 데이터 포인트 3~6개를 뽑으라"는 지침이 붙는다. 두 프롬프트 모두 `_build_user_message(summary)`(요약 dict를 `json.dumps`)를 사용자 메시지로 보낸다.
+
+**데이터 축소 전략** — 영상 길이에 비례해 무한정 늘어나는 원시 필드는 절대 그대로 보내지 않고, 이미 집계된 통계만 전달:
+
+| 원본 필드 | 보내는 것 | 버리는 것 |
+|---|---|---|
+| `counting_lines` | `counts`, `flow_rates_veh_hr`, `headway`, `total_crossings`(계산) | `crossings`(통과마다 1건) |
+| `speed` | `per_class`(클래스별 percentile 통계) | `track_speeds`, `track_cls`(트랙별 원시 샘플) |
+| `od_matrix` | `matrix_df` → `{origin: {dest: count}}` | `raw`(튜플 키, JSON 불가) |
+| `zone_analysis` | `zone_summaries` | `dwell_records`, `occupancy_timeseries`(초당 1건) |
+| `track_summary` | 클래스별 집계(`count`, `mean_duration_frames`, `mean_distance`, `mean_speed_kmh`) | 트랙별 원시 행 전체(수백 개일 수 있음) |
+| `congestion` | `events`(긴 순 상위 10개) + `total_events` | — |
+
+`enabled_flags`(`enable_traffic`/`enable_speed`/`enable_od`/`enable_urban`)는 `last_analysis`에서 역추론하지 않고 `process_videos()`의 기존 로컬 변수를 그대로 전달 — 토글 OFF와 "토글 ON이지만 결과 0"은 `last_analysis` 모양만으로 구분 불가능하기 때문.
 
 **`app.py` — 이미 그린 Figure/DataFrame에 AI 메모를 덧붙이는 두 헬퍼**(차트/표 본체 함수는 손대지 않음):
 
 ```python
+import copy   # app.py 상단에 추가
+
 def _annotate_chart(fig, highlights, category, xref="x", yref="y domain"):
+    """원본 fig는 건드리지 않고 깊은 복사본에 주석을 추가해 반환 — 재생성할 때마다
+    이전 주석이 누적되지 않도록 항상 process_videos()가 만든 원본에서 다시 그린다."""
     if fig is None or not highlights:
         return fig
     targets = [h for h in highlights if h.get("category") == category]
     if not targets:
         return fig
-    fig = copy.deepcopy(fig)   # 원본은 그대로 두고 복사본에만 주석 추가 — 재생성 시 누적 방지
+    fig = copy.deepcopy(fig)
     for h in targets:
         color = "#b45309" if h.get("importance") == "high" else "#1d4ed8"
         fig.add_annotation(
@@ -779,104 +687,176 @@ def _annotate_chart(fig, highlights, category, xref="x", yref="y domain"):
         )
     return fig
 
+
 def _highlight_dataframe(df, highlights, match_column, category):
+    """category에 해당하는 하이라이트를 df에 "AI 메모" 컬럼으로 덧붙이고, 일치하는 행에
+    배경색을 입힌 pandas Styler를 반환한다."""
     if df is None or df.empty:
         return df
     targets = {h["target"]: h for h in highlights if h.get("category") == category}
     if not targets:
         return df
+
     df = df.copy()
     df["AI 메모"] = df[match_column].map(lambda v: targets.get(v, {}).get("note", ""))
+
     def _row_style(row):
         h = targets.get(row[match_column])
         if not h:
             return [""] * len(row)
-        color = "#fef3c7" if h.get("importance") == "high" else "#eff6ff"
-        return [f"background-color: {color}"] * len(row)
+        bg = "#fef3c7" if h.get("importance") == "high" else "#eff6ff"
+        # 다크 테마 기본 글자색(밝은색)과 밝은 파스텔 배경이 겹쳐 글자가 안 보이는 문제가 있었으므로,
+        # 배경색만 지정하지 말고 글자색도 항상 함께 명시적으로 고정한다.
+        return [f"background-color: {bg}; color: #1a1a1a"] * len(row)
+
     return df.style.apply(_row_style, axis=1)
 ```
-통과수/유량 차트는 서브플롯 1("클래스별 통과 수")에만 주석을 단다(서브플롯 2와 x축 카테고리가 같아 중복 표시할 필요 없음). `gr.DataFrame`(Gradio 6.14.0 확인)은 pandas `Styler` 객체를 그대로 받아 셀 배경색을 렌더링하지만, **`interactive=False`일 때만** 동작하므로 `zone_df_out`/`track_summary_df_out` 선언에 `interactive=False`를 명시적으로 추가했음. OD 행렬은 행×열 쌍 매칭이 필요해 복잡도가 커서 v1에서는 제외(텍스트 강조점에는 포함됨).
+통과수/유량 차트는 서브플롯 1("클래스별 통과 수")에만 주석을 단다(서브플롯 2와 x축 카테고리가 같아 중복 표시할 필요 없음). `gr.DataFrame`(Gradio 6.14.0 확인)은 pandas `Styler` 객체를 그대로 받아 셀 배경색을 렌더링하지만, **`interactive=False`일 때만** 동작하므로 `zone_df_out`/`track_summary_df_out` 선언에 `interactive=False`를 명시적으로 추가해야 함. 차트 배지(`_annotate_chart`)는 배경이 이미 어두운 채도색(`#b45309`, `#1d4ed8`)이고 글자색이 흰색으로 고정돼 있어 테마와 무관하게 항상 대비가 충분하므로 같은 문제가 없음 — 다크 테마 글자색 문제는 **표** 하이라이트에만 있었음. OD 행렬은 행×열 쌍 매칭이 필요해 복잡도가 커서 차트/표 하이라이트 대상에서는 제외(텍스트 강조점에는 포함됨).
 
-**`process_videos()` — 출력 개수는 그대로 16개**: 차트를 다시 그리려면 원본 Figure/DataFrame이 필요한데, 이를 새 `gr.State` 슬롯으로 추가하지 않고 **기존 `ai_insight_state`에 저장하는 값의 모양만 dict로 확장**했음(`{"llm_summary":..., "traffic_count_fig":..., "traffic_speed_fig":..., "zone_df":..., "track_summary_df":...}`). `track_summary_df`는 기존에 `return` 문 안에서 인라인으로 한 번 더 만들던 것을 변수로 추출해 한 번만 생성하도록 바꿈.
-
-**UI — 제공자 라디오 + 조건부 그룹**:
-```python
-ai_provider_radio = gr.Radio(choices=["Claude API", "로컬 (Ollama)"], value="Claude API", label="AI 제공자")
-with gr.Group(visible=True) as claude_group:
-    ai_model_dropdown = gr.Dropdown(choices=MODEL_CHOICES, value=DEFAULT_MODEL, label="Claude 모델")
-    ai_api_key_box = gr.Textbox(label="Anthropic API 키 (선택)", type="password",
-                                 placeholder="sk-ant-... (비워두면 .env의 ANTHROPIC_API_KEY 사용)")
-with gr.Group(visible=False) as ollama_group:
-    ai_ollama_model_box = gr.Textbox(value=DEFAULT_OLLAMA_MODEL, label="Ollama 모델")
-    ai_ollama_host_box = gr.Textbox(value=DEFAULT_OLLAMA_HOST, label="Ollama 주소")
-
-ai_provider_radio.change(
-    fn=lambda p: (gr.update(visible=(p == "Claude API")), gr.update(visible=(p == "로컬 (Ollama)"))),
-    inputs=[ai_provider_radio], outputs=[claude_group, ollama_group],
-)
-```
-`run_ai_insight()`의 입력이 1개(모델명)에서 6개(스냅샷·제공자·Claude 모델·API 키·Ollama 모델·Ollama 주소)로, 출력이 1개(텍스트)에서 5개(텍스트 + 통과수 차트 + 속도 차트 + 존 표 + 트랙 표)로 늘어남. 실패 시(`AIInsightError`, 또는 스냅샷 없음) 5개 출력 모두 `gr.skip()`을 반환해 이전 결과를 보존.
-
-- **주의 (재현 시 흔히 빠지는 함정)**:
-  - `interactive=False`를 빠뜨리면 Gradio가 Styler를 무시하고 일반 값으로 렌더링해 배경색이 안 보일 수 있음 — `zone_df_out`/`track_summary_df_out` 둘 다 확인.
-  - `_annotate_chart`/`_highlight_dataframe`는 항상 `ai_insight_state`에 저장된 **원본**(`process_videos()`가 만든 깨끗한 버전)에서 시작해야 함. `run_ai_insight()`가 반환한 이전 결과(이미 주석이 붙은 Figure)를 다시 입력으로 쓰면 안 됨 — 그래서 스냅샷을 따로 보관함.
-  - 로컬 모델은 `highlights`가 항상 `[]`이므로 `render_insight_markdown()`이 자동으로 "🔍 주목할 포인트" 블록 없이 `report_markdown`만 반환함 — 별도 분기 불필요.
-  - Ollama 모델 태그는 정확히 일치해야 함(`exaone3.5:7.8b`처럼 크기까지 포함). 모델을 `ollama pull` 하지 않은 상태로 호출하면 404가 와서 "pull 실행" 안내 경고가 뜸.
-  - UI의 API 키 입력란은 비워두면 `.env`/환경변수로 자동 폴백하고, 값을 입력하면 그 값이 우선됨 — `generate_insight(..., api_key=(claude_api_key or None))`로 빈 문자열을 `None`으로 변환해야 폴백이 정상 동작함.
-- **파일**: `requirements.txt`, `src/analysis/ai_insight.py`, `app.py`
-
-#### 후속 수정 — 다크 테마에서 하이라이트 행 글자 안 보임 + AI 인사이트가 "트랙 요약"에 묻혀 있던 문제
-
-> 항목 12 배포 직후 실제 화면에서 두 가지 문제가 발견되어 수정.
-
-- **증상 1 — 하이라이트 행이 하얗게 칠해져 데이터가 안 보임**: "존 분석"/"트랙별 요약" 표에서 AI가 강조한 행이 흰색(또는 거의 흰색)으로 덮여 그 행의 모든 글자가 보이지 않음.
-- **증상 2 — AI 인사이트가 별도 영역이 아님**: AI 인사이트 전체 해설을 "트랙 요약" 아코디언을 열어야만 볼 수 있어, 두 기능이 한 섹션에 묻혀 있었음.
-- **원인 1**: `_highlight_dataframe`의 `_row_style`이 `background-color`만 지정하고 글자색은 지정하지 않음. 앱이 다크 테마라 기본 글자색이 밝은색인데, 하이라이트 배경도 밝은 파스텔색(`#fef3c7`, `#eff6ff`)이라 밝은 글자 + 밝은 배경 = 글자가 사실상 보이지 않게 됨.
-- **원인 2**: "AI 인사이트" UI 블록 전체(제공자 라디오, 모델/키 입력, 버튼, 출력 패널)를 `with gr.Accordion("트랙 요약", ...)` 블록 안에 넣어서 별도 아코디언으로 분리하지 않았음.
-- **해결 1**: `_row_style`이 반환하는 CSS 문자열에 어두운 글자색을 명시적으로 고정:
+**`app.py` — `process_videos()` 출력 개수 15 → 16**: 차트를 다시 그리려면 원본 Figure/DataFrame이 필요하므로, `ai_summary` 하나만이 아니라 그걸 포함한 스냅샷 dict를 새 `gr.State`(`ai_insight_state`)에 저장한다:
 
 ```python
-# app.py — _highlight_dataframe 내부 _row_style
-def _row_style(row):
-    h = targets.get(row[match_column])
-    if not h:
-        return [""] * len(row)
-    bg = "#fef3c7" if h.get("importance") == "high" else "#eff6ff"
-    # 다크 테마에서도 글자가 보이도록 글자색을 명시적으로 어둡게 고정
-    return [f"background-color: {bg}; color: #1a1a1a"] * len(row)
+# process_videos() 끝, 최종 return 직전에 추가
+enabled_flags = {
+    "enable_traffic": bool(enable_traffic),
+    "enable_speed": bool(enable_speed) and scale_mpp is not None,
+    "enable_od": bool(enable_od),
+    "enable_urban": bool(enable_urban),
+}
+ai_summary = build_analysis_summary(last_analysis, last_result, enabled_flags)
+ai_insight_snapshot = {
+    "llm_summary": ai_summary,
+    "traffic_count_fig": traffic_count_fig,
+    "traffic_speed_fig": traffic_speed_fig,
+    "zone_df": zone_df,
+    "track_summary_df": track_summary_df,
+}
+# return (..., batch_zip_path, ai_insight_snapshot)   ← 맨 끝에 한 개 추가
 ```
 
-- **해결 2**: "트랙 요약" 아코디언에서 AI 인사이트 관련 위젯들을 모두 빼내 `with gr.Accordion("AI 인사이트", open=True):`라는 별도 아코디언으로 분리(컴포넌트 변수명·`run_ai_insight()` 클릭 핸들러 wiring은 그대로 — 레이아웃 위치만 이동). 버튼도 `variant="secondary"` → `variant="primary"`로 바꿔 독립된 기능임을 시각적으로 강조:
+출력 개수가 늘었으므로 아래 세 곳을 함께 수정해야 함(하나라도 빠뜨리면 Gradio가 "Number of output components does not match" 에러를 던짐. `restore_session()`의 `(gr.skip(),) * 68`은 입력 위젯만 다루므로 영향 없음):
+- 조기 반환(`"영상을 먼저 업로드해주세요"`): `(None,) * 11` → `(None,) * 12`
+- `_all_outputs` 리스트 끝에 `ai_insight_state` 추가
+- `video_input.clear(fn=lambda: (None,) * 15, ...)` → `(None,) * 16`
+
+**`app.py` — UI**: "트랙 요약"과는 별도로 독립된 `"AI 인사이트"` 아코디언을 만들어 제공자 선택 라디오 + 조건부 입력 그룹을 둔다(같은 아코디언 안에 섞으면 기능이 묻혀서 찾기 어려워짐):
 
 ```python
 with gr.Accordion("트랙 요약", open=True):
     ...
     track_summary_df_out = gr.DataFrame(label="트랙별 요약", interactive=False)
 
-with gr.Accordion("AI 인사이트", open=True):   # ← 새 별도 아코디언
-    gr.Markdown("Claude API 또는 로컬 AI(Ollama)로 위 분석 결과를 한국어로 해설합니다. ...")
-    ai_provider_radio = gr.Radio(...)
-    with gr.Group(visible=True) as claude_group: ...
-    with gr.Group(visible=False) as ollama_group: ...
-    ai_insight_btn = gr.Button("AI 인사이트 생성", variant="primary")
+with gr.Accordion("AI 인사이트", open=True):
+    gr.Markdown(
+        "Claude API 또는 로컬 AI(Ollama)로 위 분석 결과를 한국어로 해설합니다. "
+        "주목할 데이터는 강조점으로 모아 보여주고(Claude만), 해당 차트·표에도 함께 표시됩니다.",
+        elem_classes="note",
+    )
+    ai_provider_radio = gr.Radio(
+        choices=["Claude API", "로컬 (Ollama)"], value="Claude API", label="AI 제공자",
+    )
+    with gr.Group(visible=True) as claude_group:
+        ai_model_dropdown = gr.Dropdown(choices=MODEL_CHOICES, value=DEFAULT_MODEL, label="Claude 모델")
+        ai_api_key_box = gr.Textbox(
+            label="Anthropic API 키 (선택)", type="password",
+            placeholder="sk-ant-... (비워두면 .env의 ANTHROPIC_API_KEY 사용)",
+        )
+    with gr.Group(visible=False) as ollama_group:
+        gr.Markdown(
+            "[Ollama 설치](https://ollama.com/download) 후 터미널에서 "
+            f"`ollama pull {DEFAULT_OLLAMA_MODEL}` 실행 (한국어 지원, 약 4.8GB). "
+            "API 키 불필요, 인터넷 연결도 불필요합니다.",
+            elem_classes="note",
+        )
+        with gr.Row():
+            ai_ollama_model_box = gr.Textbox(value=DEFAULT_OLLAMA_MODEL, label="Ollama 모델", scale=2)
+            ai_ollama_host_box = gr.Textbox(value=DEFAULT_OLLAMA_HOST, label="Ollama 주소", scale=1)
+    ai_insight_btn = gr.Button("AI 인사이트 생성", variant="primary")   # 독립 기능임을 강조하기 위해 primary
     ai_insight_output = gr.Markdown(value="", elem_classes="note")
     ai_insight_state = gr.State(value=None)
+
+ai_provider_radio.change(
+    fn=lambda p: (gr.update(visible=(p == "Claude API")), gr.update(visible=(p == "로컬 (Ollama)"))),
+    inputs=[ai_provider_radio], outputs=[claude_group, ollama_group],
+)
 ```
 
+**`app.py` — 클릭 핸들러**: 입력 6개(스냅샷·제공자·Claude 모델·API 키·Ollama 모델·Ollama 주소), 출력 5개(해설 텍스트 + 통과수 차트 + 속도 차트 + 존 표 + 트랙 표). 생성 중 버튼을 다시 누르면 같은 요청이 중첩될 수 있으므로, `.click()`을 3단계 체인으로 묶어 생성 중에는 버튼을 비활성화하고 라벨을 바꾼다:
+
+```python
+def run_ai_insight(snapshot, provider, claude_model, claude_api_key, ollama_model, ollama_host):
+    if not snapshot:
+        gr.Warning("먼저 영상을 처리해주세요. 분석 결과가 없습니다.")
+        return (gr.skip(),) * 5
+
+    provider_key = "ollama" if provider == "로컬 (Ollama)" else "claude"
+    try:
+        result = generate_insight(
+            snapshot["llm_summary"], provider=provider_key,
+            model=claude_model, api_key=(claude_api_key or None),   # 빈 문자열 → None 변환 필수(아래 주의 참고)
+            ollama_model=ollama_model, ollama_host=ollama_host,
+        )
+    except AIInsightError as e:
+        gr.Warning(str(e))
+        return (gr.skip(),) * 5
+
+    highlights = result.get("highlights") or []
+    markdown = render_insight_markdown(result)
+    count_fig = _annotate_chart(snapshot["traffic_count_fig"], highlights, "counting_lines")
+    speed_fig = _annotate_chart(snapshot["traffic_speed_fig"], highlights, "speed")
+    zone_styled = _highlight_dataframe(snapshot["zone_df"], highlights, "존", "zone_analysis")
+    track_styled = _highlight_dataframe(snapshot["track_summary_df"], highlights, "class", "track_summary")
+    return markdown, count_fig, speed_fig, zone_styled, track_styled
+
+
+ai_insight_btn.click(
+    fn=lambda: gr.update(interactive=False, value="AI 인사이트 생성 중..."),
+    inputs=[],
+    outputs=[ai_insight_btn],
+).then(
+    fn=run_ai_insight,
+    inputs=[
+        ai_insight_state, ai_provider_radio,
+        ai_model_dropdown, ai_api_key_box,
+        ai_ollama_model_box, ai_ollama_host_box,
+    ],
+    outputs=[
+        ai_insight_output, traffic_count_plot, traffic_speed_plot,
+        zone_df_out, track_summary_df_out,
+    ],
+).then(
+    fn=lambda: gr.update(interactive=True, value="AI 인사이트 생성"),
+    inputs=[],
+    outputs=[ai_insight_btn],
+)
+```
+`run_ai_insight()`는 실패 시에도 예외를 던지지 않고 `(gr.skip(),) * 5`를 반환하므로(이전 결과를 그대로 보존), 체인의 마지막 단계(버튼 재활성화)는 성공/실패 모두에서 항상 실행된다.
+
 - **주의 (재현 시 흔히 빠지는 함정)**:
-  - 차트 주석(`_annotate_chart`)은 이 문제와 무관함 — 배지 배경이 이미 어두운 채도색(`#b45309`, `#1d4ed8`)이고 글자색이 흰색으로 고정돼 있어 테마와 무관하게 항상 대비가 충분함. 문제는 **표** 하이라이트(밝은 파스텔 배경)에만 있었음.
-  - pandas Styler의 CSS 문자열은 세미콜론으로 여러 속성을 이어 쓸 수 있음(`"background-color: X; color: Y"`) — 한 속성만 덮어쓰면 나머지는 테마 기본값을 그대로 물려받는다는 점을 기억할 것.
-  - 아코디언 분리는 순수 레이아웃 변경이라 `run_ai_insight()`나 `.click()` 와이어링, `process_videos()`의 16개 출력 개수에는 영향 없음 — 컴포넌트가 Python 변수로 참조되는 한 어느 `with gr.Accordion(...)` 블록 안에 있는지는 무관함.
-- **파일**: `app.py`
+  - `ANTHROPIC_API_KEY`는 `.env` 파일(`.gitignore`에 이미 포함됨)·OS 환경변수, 또는 위 UI 비밀번호 필드로만 설정. **`SessionConfig`(세션 JSON)에는 절대 저장하지 말 것** — 세션 파일을 공유하면 키가 새어나갈 수 있음. UI 입력값은 브라우저 세션 동안만 유지되고 디스크에는 쓰지 않는다.
+  - `app.py` 상단에 `from dotenv import load_dotenv; load_dotenv()`를 다른 임포트보다 먼저 실행해야 `ANTHROPIC_API_KEY`가 호출 시점에 채워져 있음.
+  - UI의 API 키 입력란은 비워두면 `.env`/환경변수로 자동 폴백하고, 값을 입력하면 그 값이 우선됨 — `api_key=(claude_api_key or None)`로 빈 문자열을 `None`으로 변환해야 폴백이 정상 동작함.
+  - `interactive=False`를 빠뜨리면 Gradio가 Styler를 무시하고 일반 값으로 렌더링해 배경색이 안 보일 수 있음 — `zone_df_out`/`track_summary_df_out` 둘 다 확인.
+  - `_annotate_chart`/`_highlight_dataframe`는 항상 `ai_insight_state`에 저장된 **원본**(`process_videos()`가 만든 깨끗한 버전)에서 시작해야 함. `run_ai_insight()`가 반환한 이전 결과(이미 주석이 붙은 Figure)를 다시 입력으로 쓰면, 재생성할 때마다 주석이 누적된다.
+  - 로컬 모델은 `highlights`가 항상 `[]`이므로 `render_insight_markdown()`이 자동으로 "🔍 주목할 포인트" 블록 없이 `report_markdown`만 반환함 — 별도 분기 불필요.
+  - Ollama 모델 태그는 정확히 일치해야 함(`exaone3.5:7.8b`처럼 크기까지 포함). 모델을 `ollama pull` 하지 않은 상태로 호출하면 404가 와서 "pull 실행" 안내 경고가 뜸.
+  - `track_summary`는 트랙별 원시 행이 아니라 **클래스별 집계**(`_summarize_track_summary`)만 LLM에 전달됨 — 추적 객체가 수백 개여도 전송량은 클래스 수(보통 2~5개)만큼만 늘어남.
+  - pandas Styler의 CSS 문자열은 세미콜론으로 여러 속성을 이어 쓸 수 있음(`"background-color: X; color: Y"`) — 한 속성만 덮어쓰면 나머지는 테마 기본값을 그대로 물려받는다.
+  - `thinking`/`output_config.effort`는 의도적으로 사용하지 않음 — 이미 집계된 1~5KB JSON을 요약하는 단발성 작업이라 추론 단계가 품질에 도움이 되지 않고 비용·지연만 늘어남.
+- **파일**: `requirements.txt`, `src/analysis/ai_insight.py` (신규), `app.py`
 
 ---
 
-### 13. OD 행렬이 항상 비어 있고, 설정 방법을 화면에서 찾을 수 없음
+### 12. OD 행렬이 항상 비어 있거나 0으로만 나오고, 설정 방법을 화면에서 찾을 수 없음
 
-- **증상**: "OD 행렬" 체크박스를 켜고 처리해도 결과 표가 항상 비어 있거나 표시되지 않음. 무엇을 더 설정해야 하는지 화면 어디에도 안내가 없었음.
-- **원인 1 (숨겨진 의존성 버그)**: `_build_analyzers()`가 `enable_od`와 `zones`뿐 아니라 **`enable_traffic`까지 동시에 켜져 있어야** `ODMatrixBuilder`를 만들었음(`src/pipeline.py`). OD 행렬은 본질적으로 "존" 기반 기능이라 가상 감지선(교통 분석)과는 무관한데, 같은 아코디언에 체크박스가 있다는 이유만으로 강제 연동되어 있었음.
-- **원인 2 (발견 불가능한 UI 배치)**: "OD 행렬" 체크박스는 "교통 분석" 아코디언에 있었지만, 그 체크박스가 실제로 필요로 하는 "존(zone)" 설정은 완전히 다른 아코디언인 "도시 공간 분석"에 있었음. 두 설정이 서로 다른 섹션에 분리돼 있어 사용자가 둘 다 켜야 한다는 사실을 알 방법이 없었음.
-- **해결 1**: `enable_traffic` 조건 제거 — OD 행렬은 `존` + `enable_od`만으로 독립 동작하도록 수정:
+- **증상**: "OD 행렬" 체크박스를 켜고 처리해도 결과 표가 항상 비어 있거나, 두 존(Zone A/B) 모두에 진입 기록이 있는데도 OD 행렬의 모든 칸이 0으로만 표시됨. 무엇을 더 설정해야 하는지 화면 어디에도 안내가 없었음.
+- **원인**: 서로 다른 세 가지 문제가 겹쳐 있었음 — UI/설정 문제 둘과 알고리즘 버그 하나.
+  1. **숨겨진 의존성**: `_build_analyzers()`(`src/pipeline.py`)가 `enable_od`와 `zones`뿐 아니라 **`enable_traffic`까지 동시에 켜져 있어야** `ODMatrixBuilder`를 만들었음. OD 행렬은 본질적으로 "존" 기반 기능이라 가상 감지선(교통 분석)과는 무관한데, 같은 아코디언에 체크박스가 있다는 이유만으로 강제 연동되어 있었음.
+  2. **발견 불가능한 UI 배치**: "OD 행렬" 체크박스는 "교통 분석" 아코디언에 있었지만, 그 체크박스가 실제로 필요로 하는 "존(zone)" 설정은 완전히 다른 아코디언인 "도시 공간 분석"에 있었음. 두 설정이 서로 다른 섹션에 분리돼 있어 사용자가 둘 다 켜야 한다는 사실을 알 방법이 없었음.
+  3. **알고리즘 버그(위 둘을 고친 뒤에도 결과가 0으로만 나옴)**: `ODMatrixBuilder.update()`(`src/analysis/od_matrix.py`)가 트랙의 "이전 존"을 **바로 직전 프레임의 존**으로만 기억하고 있었음. 두 존 사이에 존이 아닌 일반 도로 구간이 있으면(현실에서는 거의 항상 그러함), 그 구간을 지나는 프레임마다 `_track_in_zone[tid] = None`으로 덮어써져 "Zone A에 있었다"는 기억이 사라짐. 그 결과 다음 존(Zone B)에 진입한 순간엔 `prev`가 이미 `None`이라 전이가 절대 기록되지 않음 — 두 존이 서로 붙어 있어 한 프레임 안에 바로 옮겨가는 경우에만 정상 작동하는 구조였음.
+- **해결**:
+
+**1) `enable_traffic` 의존성 제거** — OD 행렬은 `존` + `enable_od`만으로 독립 동작:
 
 ```python
 # src/pipeline.py — _build_analyzers()
@@ -886,11 +866,17 @@ if zones and analysis_config.get('enable_od'):      # enable_traffic 조건 삭�
     analyzers.append(ODMatrixBuilder(zones))
 ```
 
-- **해결 2**: "OD 행렬 계산" 체크박스를 "교통 분석"에서 빼내 실제 의존 대상인 "도시 공간 분석"의 존 정의 바로 아래로 이동하고, "최소 2개 이상의 존 필요"·"도시 분석 활성화와 무관하게 독립 동작" 안내문을 함께 추가.
-- **해결 3 — 빈 결과에 대한 안내**: 결과가 비어 있는 상황을 더 이상 빈 표로 침묵 처리하지 않고, 원인을 구분해 안내 메시지를 표시:
+**2) 체크박스를 실제 의존 대상 옆으로 이동** — "OD 행렬 계산" 체크박스를 "교통 분석"에서 빼내 "도시 공간 분석"의 존 정의 바로 아래로 옮기고, "최소 2개 이상의 존 필요"·"도시 분석 활성화와는 무관하게 독립 동작" 안내문을 함께 추가. (이동만 하면 됨 — `process_videos()`의 매개변수 순서나 `inputs=[...]` 리스트는 그대로 둬도 됨. Gradio 와이어링은 컴포넌트가 어느 `with gr.Accordion(...)` 블록에 있는지가 아니라 Python 변수 자체를 참조하기 때문.)
+
+**3) 빈 결과에 대한 안내** — 결과가 비어 있는 상황을 더 이상 빈 표로 침묵 처리하지 않고, 원인을 구분해 안내 메시지를 표시:
 
 ```python
 # app.py — process_videos()
+od_df = None
+od_data = last_analysis.get('od_matrix', {})
+if od_data and 'matrix_df' in od_data:
+    od_df = od_data['matrix_df'].reset_index()
+    od_df.rename(columns={'index': 'Origin \\ Dest'}, inplace=True)
 elif enable_od:
     if len(zones) < 2:
         od_msg = "OD 행렬에는 최소 2개 이상의 존이 필요합니다. '도시 공간 분석' 아코디언에서 존을 2개 이상 활성화하고 좌표를 입력해주세요."
@@ -899,35 +885,7 @@ elif enable_od:
     od_df = pd.DataFrame({"안내": [od_msg]})
 ```
 
-- **부가 수정 — AI 인사이트 버튼 중복 클릭 방지**: 생성 중에도 버튼이 계속 클릭 가능해 같은 요청이 중첩 발생할 수 있었음. `.click()`을 3단계 체인(`버튼 비활성화 → run_ai_insight → 버튼 재활성화`)으로 분리해 생성 중에는 버튼이 "AI 인사이트 생성 중..."으로 바뀌고 비활성화됨:
-
-```python
-ai_insight_btn.click(
-    fn=lambda: gr.update(interactive=False, value="AI 인사이트 생성 중..."),
-    outputs=[ai_insight_btn],
-).then(
-    fn=run_ai_insight, inputs=[...], outputs=[...],
-).then(
-    fn=lambda: gr.update(interactive=True, value="AI 인사이트 생성"),
-    outputs=[ai_insight_btn],
-)
-```
-`run_ai_insight()`는 실패 시에도 예외를 던지지 않고 `(gr.skip(),) * 5`를 반환하므로, 체인의 마지막 단계(재활성화)는 성공/실패 모두에서 항상 실행됨.
-- **주의 (재현 시 흔히 빠지는 함정)**:
-  - `enable_od` 체크박스를 옮겨도 `process_videos()`의 매개변수 순서나 `inputs=[...]` 리스트는 그대로 둬도 됨 — Gradio 와이어링은 컴포넌트가 어느 `with gr.Accordion(...)` 블록에 있는지가 아니라 Python 변수 자체를 참조하므로, UI상 위치 이동은 함수 시그니처/입력 리스트와 무관함.
-  - 존(zone)은 "도시 분석 활성화"(`enable_urban`) 체크박스와 무관하게 항상 정의 가능 — `enable_urban`은 `ZoneAnalyzer`/히트맵에만 영향을 주고, OD 행렬은 별도로 `zones` 리스트 자체만 본다.
-  - OD 행렬이 0이 아닌 값을 가지려면 같은 트랙이 서로 다른 두 존을 실제로 통과해야 함 — 존 1개만 활성화하면 모든 진입이 "같은 곳"이라 거리(전이)가 기록되지 않아 항상 빈 결과가 나옴(버그 아님, 정상 동작).
-- **파일**: `src/pipeline.py`, `app.py`
-
----
-
-### 14. 존을 2개 이상 설정해도 OD 행렬이 항상 0으로만 나옴
-
-> 항목 13으로 설정/UI 문제를 고친 뒤에도, 실제 화면에서 두 존(Zone A/B)에 모두 진입 기록이 있는데 OD 행렬 결과가 여전히 전부 0으로 나오는 문제가 보고됨 — 항목 13과는 별개의, 더 근본적인 로직 버그.
-
-- **증상**: "Zone A [5]", "Zone B [1]"처럼 두 존 모두에 진입 기록이 있음에도, OD 행렬 표는 모든 칸이 0으로 표시됨.
-- **원인**: `ODMatrixBuilder.update()`(`src/analysis/od_matrix.py`)가 트랙의 "이전 존"을 **바로 직전 프레임의 존**으로만 기억하고 있었음. 두 존 사이에 존이 아닌 일반 도로 구간이 있으면(현실에서는 거의 항상 그러함), 그 구간을 지나는 프레임마다 `_track_in_zone[tid] = None`으로 덮어써져 "Zone A에 있었다"는 기억이 사라짐. 그 결과 다음 존(Zone B)에 진입한 순간엔 `prev`가 이미 `None`이라 전이가 절대 기록되지 않음 — 두 존이 서로 붙어 있어 한 프레임 안에 바로 옮겨가는 경우에만 정상 작동하는 구조였음.
-- **해결**: 트랙이 어떤 존에도 속하지 않는 프레임은 그냥 건너뛰도록 변경 — `_track_in_zone[tid]`는 트랙이 **마지막으로 확인된 존**만 기억하고, 존이 아닌 구간을 지나도 지워지지 않음:
+**4) 알고리즘 버그 수정** — 트랙이 어떤 존에도 속하지 않는 프레임은 그냥 건너뛰도록 변경. `_track_in_zone[tid]`는 트랙이 **마지막으로 확인된 존**만 기억하고, 존이 아닌 구간을 지나도 지워지지 않음:
 
 ```python
 # src/analysis/od_matrix.py — ODMatrixBuilder.update()
@@ -951,20 +909,92 @@ def update(self, frame_idx, track_data, fps):
 검증: 트랙이 Zone A(연속 2프레임) → 존 없는 구간(연속 3프레임) → Zone B로 이동하는 시나리오를 시뮬레이션해, 수정 전엔 전이가 0건 기록되고 수정 후엔 `(Zone A, Zone B): 1`이 정확히 기록됨을 확인.
 
 - **주의 (재현 시 흔히 빠지는 함정)**:
-  - `origin`은 트랙이 **최초로** 진입한 존으로 고정되고 이후 다른 존에 들어가도 갱신되지 않음(의도된 동작) — 즉 A→B→C로 이동하면 (A,B)와 (A,C) 둘 다 기록되고 (B,C)는 기록되지 않음. "최초 출발지 기준" OD 행렬이라는 설계를 유지했고, 이번 수정은 그 설계 자체가 아니라 "존 사이 공백 구간에서 기억이 끊기는" 버그만 고친 것.
-  - 같은 존 안에 머무는 동안은(`prev == zone`) 매 프레임 중복 카운트되지 않음 — 이 부분은 기존에도 정상이었음.
-- **파일**: `src/analysis/od_matrix.py`
+  - 위 4가지를 **모두** 적용해야 함 — 1·2만 고치면 체크박스를 찾고 켤 수는 있지만 알고리즘 버그 때문에 결과가 계속 0으로 나오고, 4만 고치면 애초에 체크박스/존 설정을 못 찾거나 `enable_traffic`이 꺼져 있으면 분석기 자체가 안 만들어져서 여전히 아무 결과도 안 나옴.
+  - 존(zone)은 "도시 분석 활성화"(`enable_urban`) 체크박스와 무관하게 항상 정의 가능 — `enable_urban`은 `ZoneAnalyzer`/히트맵에만 영향을 주고, OD 행렬은 별도로 `zones` 리스트 자체만 본다.
+  - `origin`은 트랙이 **최초로** 진입한 존으로 고정되고 이후 다른 존에 들어가도 갱신되지 않음(의도된 동작) — 즉 A→B→C로 이동하면 (A,B)와 (A,C) 둘 다 기록되고 (B,C)는 기록되지 않음. "최초 출발지 기준" OD 행렬이라는 설계이며, 알고리즘 수정은 이 설계 자체가 아니라 "존 사이 공백 구간에서 기억이 끊기는" 버그만 고친 것.
+  - 같은 존 안에 머무는 동안은(`prev == zone`) 매 프레임 중복 카운트되지 않음.
+  - OD 행렬이 0이 아닌 값을 가지려면 같은 트랙이 서로 다른 두 존을 실제로 통과해야 함 — 존 1개만 활성화하면 모든 진입이 "같은 곳"이라 전이가 기록되지 않아 항상 빈 결과가 나옴(이건 버그가 아니라 정상 동작).
+- **파일**: `src/pipeline.py`, `src/analysis/od_matrix.py`, `app.py`
 
 ---
 
-### 15. 배치 처리 시 마지막 영상의 결과만 표시되고, 다른 영상은 확인할 수 없음
+### 13. 배치 처리 시 마지막 영상의 결과만 표시되고, 다른 영상은 확인할 수 없음
 
 - **증상**: 여러 영상을 배치로 처리하면 "영상별 처리 요약" 표와 ZIP 다운로드는 모든 영상을 포함하지만, 위쪽 결과 영역(영상·차트·표·AI 인사이트)에는 **마지막으로 처리된 영상의 결과만** 표시됨. 다른 영상의 결과를 보려면 ZIP을 받아 직접 열어보는 것 외에는 방법이 없었음.
 - **원인**: `process_videos()`가 영상 루프(`all_results`)를 다 돈 뒤 `last_vpath, last_result = all_results[-1]`로 **마지막 항목만** 꺼내 차트(`_make_traffic_count_chart` 등)·표(OD/존/트랙 요약)·AI 인사이트 요약을 빌드했음. 나머지 영상들의 분석 결과는 ZIP에 파일로만 묻히고, 화면에 다시 불러올 방법이 전혀 없었음.
-- **해결**: 영상별로 화면 표시용 산출물(차트·표·AI 인사이트 스냅샷)을 묶는 `_build_video_package()` 함수를 새로 만들어, 루프가 끝난 뒤 **모든 영상에 대해** 호출하고 그 결과 리스트(`packages`)를 새 `gr.State`(`batch_packages_state`)에 저장. 기본 화면은 여전히 마지막 영상(`packages[-1]`)을 보여주되, "배치 처리 결과" 아래에 드롭다운 + 버튼을 추가해 다른 영상으로 전환 가능:
+- **해결**: 영상별로 화면 표시용 산출물(차트·표·AI 인사이트 스냅샷)을 묶는 `_build_video_package()` 함수를 새로 만들어, 루프가 끝난 뒤 **모든 영상에 대해** 호출하고 그 결과 리스트(`packages`)를 새 `gr.State`(`batch_packages_state`)에 저장. 기본 화면은 여전히 마지막 영상(`packages[-1]`)을 보여주되, "배치 처리 결과" 아래에 드롭다운 + 버튼을 추가해 다른 영상으로 전환 가능.
+
+**신규 함수 — `_build_video_package()`**: 기존에 `process_videos()` 안에서 "마지막 영상"에 대해 한 번만 하던 차트/표/AI 스냅샷 빌드 로직(항목 12의 OD 빈 결과 안내 포함)을 함수로 추출한 것 — `_make_traffic_count_chart`/`_make_speed_chart`(항목 10)/`build_analysis_summary`(항목 11)는 모두 그대로 재사용:
 
 ```python
-# app.py — process_videos() 안
+# app.py — process_videos() 정의보다 앞에 추가
+def _build_video_package(vpath, result, zones, enable_od, enabled_flags, label):
+    """단일 영상의 처리 결과로부터 화면에 표시할 차트·표·AI 인사이트 스냅샷을 만든다."""
+    analysis = result.get('analysis', {})
+
+    counting_data = analysis.get('counting_lines', [])
+    speed_data = analysis.get('speed', {})
+    traffic_count_fig = _make_traffic_count_chart(counting_data)
+    traffic_speed_fig = _make_speed_chart(speed_data)
+
+    od_df = None
+    od_data = analysis.get('od_matrix', {})
+    if od_data and 'matrix_df' in od_data:
+        od_df = od_data['matrix_df'].reset_index()
+        od_df.rename(columns={'index': 'Origin \\ Dest'}, inplace=True)
+    elif enable_od:
+        if len(zones) < 2:
+            od_msg = ("OD 행렬에는 최소 2개 이상의 존이 필요합니다. "
+                      "'도시 공간 분석' 아코디언에서 존을 2개 이상 활성화하고 좌표를 입력해주세요.")
+        else:
+            od_msg = "이번 영상에서는 활성화된 존 사이를 이동한 객체가 감지되지 않았습니다."
+        od_df = pd.DataFrame({"안내": [od_msg]})
+
+    zone_df = None
+    zone_data = analysis.get('zone_analysis', {})
+    if zone_data and zone_data.get('zone_summaries'):
+        rows = []
+        for zs in zone_data['zone_summaries']:
+            util = zs.get('utilization') or {}
+            rows.append({
+                '존': zs['zone'], '입장 횟수': zs['entry_count'],
+                '평균 체류 (s)': zs['mean_dwell_s'], '최대 체류 (s)': zs['max_dwell_s'],
+                '평균 밀도 (명/m²)': util.get('mean_density_per_sqm', ''),
+                '피크 밀도 (명/m²)': util.get('peak_density_per_sqm', ''),
+            })
+        if rows:
+            zone_df = pd.DataFrame(rows)
+
+    track_summary_df = pd.DataFrame(result.get('track_summary', []))
+    ai_summary = build_analysis_summary(analysis, result, enabled_flags)
+    ai_insight_snapshot = {
+        "llm_summary": ai_summary,
+        "traffic_count_fig": traffic_count_fig,
+        "traffic_speed_fig": traffic_speed_fig,
+        "zone_df": zone_df,
+        "track_summary_df": track_summary_df,
+    }
+
+    return {
+        "label": label,
+        "video": result['video'], "csv": result['csv'], "trajectory_img": result['trajectory_img'],
+        "heatmap_img": result.get('heatmap_img'), "excel": result.get('excel'), "charts": result.get('charts'),
+        "traffic_count_fig": traffic_count_fig, "traffic_speed_fig": traffic_speed_fig,
+        "od_df": od_df, "zone_df": zone_df, "track_summary_df": track_summary_df,
+        "ai_insight_snapshot": ai_insight_snapshot,
+    }
+```
+
+**`process_videos()`에서 모든 영상에 대해 호출**:
+
+```python
+# app.py — process_videos() 안, 영상 처리 루프(all_results) 다음
+enabled_flags = {
+    "enable_traffic": bool(enable_traffic),
+    "enable_speed": bool(enable_speed) and scale_mpp is not None,
+    "enable_od": bool(enable_od),
+    "enable_urban": bool(enable_urban),
+}
 packages = [
     _build_video_package(vp, res, zones, bool(enable_od), enabled_flags,
                           label=f"{idx+1:02d}. {Path(vp).name}")
@@ -974,6 +1004,7 @@ last_pkg = packages[-1]
 ...
 batch_video_choices = gr.update(choices=[pkg['label'] for pkg in packages], value=last_pkg['label'])
 # 18 outputs: 기존 16개 + packages(batch_packages_state) + batch_video_choices(batch_video_select)
+# 최종 return의 각 자리는 last_pkg['video'], last_pkg['csv'], ..., last_pkg['ai_insight_snapshot'], packages, batch_video_choices
 ```
 
 ```python
@@ -1015,14 +1046,15 @@ batch_view_btn.click(
 
 ---
 
-### 16. 궤적 요약 이미지가 객체 레이블 범례 때문에 세로로 과도하게 늘어남 + 배치 처리 시 세션 파일이 생성되지 않음
+### 14. 궤적 요약 이미지가 객체 레이블 범례 때문에 세로로 과도하게 늘어남
 
-- **증상 1**: `trajectory_summary.png`에서 추적 객체 수가 많을 때(수십 개) 이미지 우측에 트랙ID별 범례(`#51`, `#52`, ...)가 한 줄씩 표시되는데, matplotlib이 `bbox_inches='tight'`로 저장하면서 그 범례를 전부 담으려고 이미지 높이를 범례 길이만큼 늘려버림 — 실제 궤적 그림은 위쪽 일부일 뿐인데 그 아래로 새까만 빈 공간이 수천 픽셀 이어짐.
-- **원인 1**: `SummaryImageExporter.save()`(`src/visualization/exporter.py`)가 트랙마다 `mpatches.Patch(color=c, label=f'#{tid}')`를 만들어 `ax.legend(...)`로 전부 표시하고 있었음. 트랙 수에 비례해 범례 칸 수가 늘어나는데 폭은 그대로라 한 칸씩 아래로 쌓이며 이미지 전체가 세로로 늘어짐.
-- **해결 1**: 범례(객체별 레이블) 자체를 제거. 각 트랙은 여전히 고유 색상으로 구분되어 경로/예측선이 그려지지만, 어떤 색이 어떤 트랙 ID인지 알려주는 텍스트 목록은 더 이상 그리지 않음:
+- **증상**: `trajectory_summary.png`에서 추적 객체 수가 많을 때(수십 개) 이미지 우측에 트랙ID별 범례(`#51`, `#52`, ...)가 한 줄씩 표시되는데, matplotlib이 `bbox_inches='tight'`로 저장하면서 그 범례를 전부 담으려고 이미지 높이를 범례 길이만큼 늘려버림 — 실제 궤적 그림은 위쪽 일부일 뿐인데 그 아래로 새까만 빈 공간이 수천 픽셀 이어짐.
+- **원인**: `SummaryImageExporter.save()`(`src/visualization/exporter.py`)가 트랙마다 `mpatches.Patch(color=c, label=f'#{tid}')`를 만들어 `ax.legend(...)`로 전부 표시하고 있었음. 트랙 수에 비례해 범례 칸 수가 늘어나는데 폭은 그대로라 한 칸씩 아래로 쌓이며 이미지 전체가 세로로 늘어짐.
+- **해결**: 범례(객체별 레이블) 자체를 제거. 각 트랙은 여전히 고유 색상으로 구분되어 경로/예측선이 그려지지만, 어떤 색이 어떤 트랙 ID인지 알려주는 텍스트 목록은 더 이상 그리지 않음:
 
 ```python
 # src/visualization/exporter.py — SummaryImageExporter.save()
+# (mpatches.Patch 수집 + ax.legend(...) 호출을 완전히 삭제하고, 선/마커만 그린다)
 for tid, pts in self.histories.items():
     if len(pts) < 2:
         continue
@@ -1031,26 +1063,47 @@ for tid, pts in self.histories.items():
     ax.plot(xs, ys, '-', color=c, linewidth=1.5, alpha=0.85)
     ax.plot(xs[-1], ys[-1], 'o', color=c, markersize=5)
     if tid in self.predictions:
-        ...
-# ax.legend(...) 호출 및 mpatches.Patch 수집 로직 삭제
+        pxs = [pts[-1][0]] + [p[0] for p in self.predictions[tid]]
+        pys = [pts[-1][1]] + [p[1] for p in self.predictions[tid]]
+        ax.plot(pxs, pys, '--', color=c, linewidth=1.5, alpha=0.6)
 ```
+파일 맨 위 `import matplotlib.patches as mpatches`도 더 이상 쓰이지 않으므로 함께 제거.
+
 검증: 트랙 69개를 시뮬레이션해 저장한 결과 이미지 크기가 `1785×1183`으로 정상 범위에 머무는 것을 확인(범례가 있을 때는 트랙 수에 비례해 수천 픽셀까지 늘어났음).
 
-- **증상 2**: 배치 처리(여러 영상 동시 업로드) 후에는 "세션 파일 (JSON)" 다운로드가 항상 비어 있음(단일 영상 처리 시에는 정상 생성됨).
-- **원인 2**: `process_videos()`의 세션 저장 블록이 `if not is_batch:`로 감싸여 있어, 배치 처리 시에는 의도적으로 건너뛰고 있었음(`session_out = None`).
-- **해결 2**: 세션 저장을 배치/단일 공통 로직으로 변경. 배치는 영상이 여러 개라 `video_hash`(특정 영상 하나를 가리키는 해시) 필드는 의미가 없으므로 비워두고, 대신 처리된 파일 목록을 `notes`에 덧붙이고 `stats`에는 전체 영상의 합산 프레임·트랙 수를 기록:
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - 범례를 지워도 트랙 구분 자체는 그대로 유지됨 — `self.colors.get(tid, ...)`로 트랙마다 고유 색을 쓰는 로직은 손대지 않았으므로, "어떤 트랙인지"는 색으로 구분 가능하고 "이 색이 트랙 몇 번인지" 텍스트만 빠진 것.
+  - 이 이미지는 `process_videos()`의 결과 화면(`summary_img`)뿐 아니라 배치 ZIP에도 `trajectory.png`로 포함되므로, 두 경로 모두에서 동일하게 정상 크기로 나오는지 확인할 것.
+- **파일**: `src/visualization/exporter.py`
+
+---
+
+### 15. 배치 처리 시 세션 파일이 생성되지 않음
+
+- **증상**: 배치 처리(여러 영상 동시 업로드) 후에는 "세션 파일 (JSON)" 다운로드가 항상 비어 있음(단일 영상 처리 시에는 정상 생성됨).
+- **원인**: `process_videos()`의 세션 저장 블록이 `if not is_batch:`로 감싸여 있어, 배치 처리 시에는 의도적으로 건너뛰고 있었음(`session_out = None`).
+- **해결**: 세션 저장을 배치/단일 공통 로직으로 변경. 배치는 영상이 여러 개라 `video_hash`(특정 영상 하나를 가리키는 해시) 필드는 의미가 없으므로 비워두고, 대신 처리된 파일 목록을 `notes`에 덧붙이고 `stats`에는 전체 영상의 합산 프레임·트랙 수를 기록:
 
 ```python
 # app.py — process_videos()
+# total_frames/total_tracks는 is_batch 분기 밖에서 항상 계산해둔 값(단일 영상이면 영상 1개분의 합과 같음)
 notes_text = session_notes or ''
 if is_batch:
     file_list = ', '.join(Path(vp).name for vp, _ in all_results)
     batch_tag = f"[배치 처리 — {total_videos}개 영상: {file_list}]"
     notes_text = f"{notes_text}\n{batch_tag}" if notes_text else batch_tag
 
+tmp_dir = Path(tempfile.mkdtemp())
+session_path = tmp_dir / "session.json"
 session_cfg = SessionConfig(
     video_hash=('' if is_batch else AnalysisSession.compute_video_hash(last_vpath)),
-    ...
+    yolo_model=yolo_model, conf_thresh=conf_thresh, seq_len=int(seq_len), pred_len=int(pred_len),
+    lstm_mode=mode, class_filter=list(class_filter) if class_filter else [],
+    counting_lines=counting_lines, zones=zones, zone_areas=zone_areas, scale_mpp=scale_mpp,
+    enable_traffic=bool(enable_traffic), enable_speed=bool(enable_speed), enable_od=bool(enable_od),
+    enable_urban=bool(enable_urban), enable_heatmap=bool(enable_heatmap),
+    heatmap_classes=list(heatmap_classes) if heatmap_classes else [],
+    export_format=export_format, enable_mc_dropout=bool(enable_mc_dropout), chart_format=chart_format,
     notes=notes_text,
     stats={'total_frames': total_frames, 'total_tracks': total_tracks, 'device': DEVICE_DESC},
 )
@@ -1059,8 +1112,9 @@ session_out = str(session_path)   # is_batch 분기 없이 항상 실행
 ```
 - **주의 (재현 시 흔히 빠지는 함정)**:
   - `restore_session()`은 `video_hash`를 현재 업로드된 영상과 비교·검증하지 않고 단순히 메타데이터로만 저장함 — 배치 세션에서 비워둬도 설정 복원에는 전혀 영향 없음.
-  - `total_frames`/`total_tracks`는 기존에 `is_batch` 분기 안에서만 계산되던 것을 분기 밖으로 빼서 항상 계산하도록 바꿈 — 단일 영상 처리 시의 상태 텍스트(`status`)는 여전히 `last_stats`를 쓰므로 동작 변화 없음.
-- **파일**: `src/visualization/exporter.py`, `app.py`
+  - `total_frames`/`total_tracks`는 기존에 `is_batch` 분기 안에서만 계산되던 것을 분기 밖으로 빼서 항상 계산하도록 바꿔야 함 — 단일 영상 처리 시의 상태 텍스트(`status`)는 여전히 `last_stats`를 쓰므로 그쪽 동작에는 변화가 없음.
+  - 출력 개수나 `_all_outputs` 목록에는 변화가 없음 — `session_download` 슬롯 자체는 항목 10 이전부터 이미 존재했고, 이번 수정은 그 슬롯에 값을 채우는 조건만 바꾼 것.
+- **파일**: `app.py`
 
 ---
 
