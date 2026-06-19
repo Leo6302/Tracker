@@ -957,6 +957,64 @@ def update(self, frame_idx, track_data, fps):
 
 ---
 
+### 15. 배치 처리 시 마지막 영상의 결과만 표시되고, 다른 영상은 확인할 수 없음
+
+- **증상**: 여러 영상을 배치로 처리하면 "영상별 처리 요약" 표와 ZIP 다운로드는 모든 영상을 포함하지만, 위쪽 결과 영역(영상·차트·표·AI 인사이트)에는 **마지막으로 처리된 영상의 결과만** 표시됨. 다른 영상의 결과를 보려면 ZIP을 받아 직접 열어보는 것 외에는 방법이 없었음.
+- **원인**: `process_videos()`가 영상 루프(`all_results`)를 다 돈 뒤 `last_vpath, last_result = all_results[-1]`로 **마지막 항목만** 꺼내 차트(`_make_traffic_count_chart` 등)·표(OD/존/트랙 요약)·AI 인사이트 요약을 빌드했음. 나머지 영상들의 분석 결과는 ZIP에 파일로만 묻히고, 화면에 다시 불러올 방법이 전혀 없었음.
+- **해결**: 영상별로 화면 표시용 산출물(차트·표·AI 인사이트 스냅샷)을 묶는 `_build_video_package()` 함수를 새로 만들어, 루프가 끝난 뒤 **모든 영상에 대해** 호출하고 그 결과 리스트(`packages`)를 새 `gr.State`(`batch_packages_state`)에 저장. 기본 화면은 여전히 마지막 영상(`packages[-1]`)을 보여주되, "배치 처리 결과" 아래에 드롭다운 + 버튼을 추가해 다른 영상으로 전환 가능:
+
+```python
+# app.py — process_videos() 안
+packages = [
+    _build_video_package(vp, res, zones, bool(enable_od), enabled_flags,
+                          label=f"{idx+1:02d}. {Path(vp).name}")
+    for idx, (vp, res) in enumerate(all_results)
+]
+last_pkg = packages[-1]
+...
+batch_video_choices = gr.update(choices=[pkg['label'] for pkg in packages], value=last_pkg['label'])
+# 18 outputs: 기존 16개 + packages(batch_packages_state) + batch_video_choices(batch_video_select)
+```
+
+```python
+# app.py — UI ("배치 처리 결과" 섹션)
+with gr.Row():
+    batch_video_select = gr.Dropdown(label="결과를 확인할 영상 선택", choices=[], value=None, scale=3)
+    batch_view_btn = gr.Button("선택한 영상 결과 보기", scale=1)
+batch_packages_state = gr.State(value=None)
+
+def view_batch_video(packages, label):
+    if not packages or not label:
+        gr.Warning("선택할 영상이 없습니다. 먼저 배치 처리를 완료해주세요.")
+        return (gr.skip(),) * 14
+    pkg = next((p for p in packages if p["label"] == label), None)
+    if pkg is None:
+        gr.Warning("선택한 영상의 결과를 찾을 수 없습니다.")
+        return (gr.skip(),) * 14
+    return (pkg["video"], pkg["csv"], pkg["trajectory_img"], f"{label}  결과 표시 중",
+            pkg["traffic_count_fig"], pkg["traffic_speed_fig"], pkg["od_df"],
+            pkg["heatmap_img"], pkg["zone_df"], pkg["track_summary_df"],
+            pkg["excel"], pkg["charts"], pkg["ai_insight_snapshot"], "")
+
+batch_view_btn.click(
+    fn=view_batch_video,
+    inputs=[batch_packages_state, batch_video_select],
+    outputs=[video_output, csv_download, summary_img, status_box,
+             traffic_count_plot, traffic_speed_plot, od_df_out,
+             heatmap_img_out, zone_df_out, track_summary_df_out,
+             excel_download, charts_download, ai_insight_state, ai_insight_output],
+)
+```
+
+- **부가 효과**: `ai_insight_state`도 영상을 전환할 때 함께 바뀌므로, 드롭다운으로 영상을 고른 뒤 "AI 인사이트 생성"을 누르면 **그 영상**에 대한 해설이 새로 생성됨(이전 영상의 해설 텍스트는 전환 시 자동으로 비움).
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - `process_videos()`의 출력 개수가 16개 → 18개로 늘어남 — `_all_outputs`, `video_input.clear()`의 초기화 튜플, "영상 업로드 안 함" 에러 반환 튜플까지 **세 군데 모두** 같은 길이로 맞춰야 함. 길이가 안 맞으면 Gradio가 와이어링 단계에서 조용히 잘못된 컴포넌트에 값을 매핑하거나 에러를 던짐.
+  - 드롭다운 라벨은 `"01. 파일명.mp4"`처럼 순번을 앞에 붙임 — 배치 파일 중 이름이 같은 영상이 섞여 있어도 라벨이 겹치지 않도록 하기 위함.
+  - 단일 영상 처리 시에는 `is_batch`가 False라 드롭다운 choices가 빈 채로 남음(기존 `batch_summary_df_out`/`batch_zip_download`가 단일 처리 시 비어 있는 것과 동일한 동작) — 버그가 아니라 배치 전용 기능이라는 의미.
+- **파일**: `app.py`
+
+---
+
 ## 라이선스
 
 MIT

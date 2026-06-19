@@ -278,6 +278,78 @@ def _highlight_dataframe(df, highlights, match_column, category):
     return df.style.apply(_row_style, axis=1)
 
 
+def _build_video_package(vpath, result, zones, enable_od, enabled_flags, label):
+    """단일 영상의 처리 결과로부터 화면에 표시할 차트·표·AI 인사이트 스냅샷을 만든다.
+
+    배치 처리 시 영상마다 한 번씩 호출되어, 영상별 패키지를 독립적으로 보관함으로써
+    나중에 사용자가 드롭다운으로 영상을 골라 다시 확인할 수 있게 한다.
+    """
+    analysis = result.get('analysis', {})
+
+    counting_data = analysis.get('counting_lines', [])
+    speed_data = analysis.get('speed', {})
+    traffic_count_fig = _make_traffic_count_chart(counting_data)
+    traffic_speed_fig = _make_speed_chart(speed_data)
+
+    od_df = None
+    od_data = analysis.get('od_matrix', {})
+    if od_data and 'matrix_df' in od_data:
+        od_df = od_data['matrix_df'].reset_index()
+        od_df.rename(columns={'index': 'Origin \\ Dest'}, inplace=True)
+    elif enable_od:
+        if len(zones) < 2:
+            od_msg = (
+                "OD 행렬에는 최소 2개 이상의 존이 필요합니다. "
+                "'도시 공간 분석' 아코디언에서 존을 2개 이상 활성화하고 좌표를 입력해주세요."
+            )
+        else:
+            od_msg = "이번 영상에서는 활성화된 존 사이를 이동한 객체가 감지되지 않았습니다."
+        od_df = pd.DataFrame({"안내": [od_msg]})
+
+    zone_df = None
+    zone_data = analysis.get('zone_analysis', {})
+    if zone_data and zone_data.get('zone_summaries'):
+        rows = []
+        for zs in zone_data['zone_summaries']:
+            util = zs.get('utilization') or {}
+            rows.append({
+                '존': zs['zone'],
+                '입장 횟수': zs['entry_count'],
+                '평균 체류 (s)': zs['mean_dwell_s'],
+                '최대 체류 (s)': zs['max_dwell_s'],
+                '평균 밀도 (명/m²)': util.get('mean_density_per_sqm', ''),
+                '피크 밀도 (명/m²)': util.get('peak_density_per_sqm', ''),
+            })
+        if rows:
+            zone_df = pd.DataFrame(rows)
+
+    track_summary_df = pd.DataFrame(result.get('track_summary', []))
+    ai_summary = build_analysis_summary(analysis, result, enabled_flags)
+    ai_insight_snapshot = {
+        "llm_summary": ai_summary,
+        "traffic_count_fig": traffic_count_fig,
+        "traffic_speed_fig": traffic_speed_fig,
+        "zone_df": zone_df,
+        "track_summary_df": track_summary_df,
+    }
+
+    return {
+        "label": label,
+        "video": result['video'],
+        "csv": result['csv'],
+        "trajectory_img": result['trajectory_img'],
+        "heatmap_img": result.get('heatmap_img'),
+        "excel": result.get('excel'),
+        "charts": result.get('charts'),
+        "traffic_count_fig": traffic_count_fig,
+        "traffic_speed_fig": traffic_speed_fig,
+        "od_df": od_df,
+        "zone_df": zone_df,
+        "track_summary_df": track_summary_df,
+        "ai_insight_snapshot": ai_insight_snapshot,
+    }
+
+
 # ── process_videos ────────────────────────────────────────────────────────
 # Line inputs: 4 lines × (enable, label, x1, y1, x2, y2) = 24 params
 # Zone inputs: 4 zones × (enable, name, x1, y1, x2, y2, area) = 28 params
@@ -315,7 +387,10 @@ def process_videos(
         paths = []
 
     if not paths:
-        return (None, None, None, "영상을 먼저 업로드해주세요.") + (None,) * 12
+        return (
+            (None, None, None, "영상을 먼저 업로드해주세요.") + (None,) * 13
+            + (gr.update(choices=[], value=None),)
+        )
 
     is_batch = len(paths) > 1
     total_videos = len(paths)
@@ -406,7 +481,6 @@ def process_videos(
 
     last_vpath, last_result = all_results[-1]
     last_stats = last_result['stats']
-    last_analysis = last_result.get('analysis', {})
 
     if is_batch:
         total_frames = sum(r['stats']['total_frames'] for _, r in all_results)
@@ -423,43 +497,23 @@ def process_videos(
             f"  |  장치: {DEVICE_DESC}"
         )
 
-    # ── 교통 분석 차트 ────────────────────────────────────────────
-    counting_data = last_analysis.get('counting_lines', [])
-    speed_data = last_analysis.get('speed', {})
-    traffic_count_fig = _make_traffic_count_chart(counting_data)
-    traffic_speed_fig = _make_speed_chart(speed_data)
-
-    od_df = None
-    od_data = last_analysis.get('od_matrix', {})
-    if od_data and 'matrix_df' in od_data:
-        od_df = od_data['matrix_df'].reset_index()
-        od_df.rename(columns={'index': 'Origin \\ Dest'}, inplace=True)
-    elif enable_od:
-        if len(zones) < 2:
-            od_msg = (
-                "OD 행렬에는 최소 2개 이상의 존이 필요합니다. "
-                "'도시 공간 분석' 아코디언에서 존을 2개 이상 활성화하고 좌표를 입력해주세요."
-            )
-        else:
-            od_msg = "이번 영상에서는 활성화된 존 사이를 이동한 객체가 감지되지 않았습니다."
-        od_df = pd.DataFrame({"안내": [od_msg]})
-
-    zone_df = None
-    zone_data = last_analysis.get('zone_analysis', {})
-    if zone_data and zone_data.get('zone_summaries'):
-        rows = []
-        for zs in zone_data['zone_summaries']:
-            util = zs.get('utilization') or {}
-            rows.append({
-                '존': zs['zone'],
-                '입장 횟수': zs['entry_count'],
-                '평균 체류 (s)': zs['mean_dwell_s'],
-                '최대 체류 (s)': zs['max_dwell_s'],
-                '평균 밀도 (명/m²)': util.get('mean_density_per_sqm', ''),
-                '피크 밀도 (명/m²)': util.get('peak_density_per_sqm', ''),
-            })
-        if rows:
-            zone_df = pd.DataFrame(rows)
+    # ── 영상별 표시 패키지 (차트·표·AI 인사이트 스냅샷) ────────────────────
+    # 배치 처리 시 마지막 영상만 보여주던 것을 고쳐, 영상마다 패키지를 만들어
+    # 보관해두고 드롭다운으로 골라 다시 확인할 수 있게 한다.
+    enabled_flags = {
+        "enable_traffic": bool(enable_traffic),
+        "enable_speed": bool(enable_speed) and scale_mpp is not None,
+        "enable_od": bool(enable_od),
+        "enable_urban": bool(enable_urban),
+    }
+    packages = [
+        _build_video_package(
+            vp, res, zones, bool(enable_od), enabled_flags,
+            label=f"{idx+1:02d}. {Path(vp).name}",
+        )
+        for idx, (vp, res) in enumerate(all_results)
+    ]
+    last_pkg = packages[-1]
 
     # ── 세션 저장 ─────────────────────────────────────────────────
     session_out = None
@@ -498,6 +552,7 @@ def process_videos(
     # ── 배치 전용 출력 ────────────────────────────────────────────
     batch_summary_df = None
     batch_zip_path = None
+    batch_video_choices = gr.update(choices=[], value=None)
 
     if is_batch:
         summary_rows = []
@@ -529,43 +584,31 @@ def process_videos(
                         zf.write(fpath, f"{prefix}/{arcname}")
         batch_zip_path = str(zip_tmp)
 
-    # ── AI 인사이트용 요약 데이터 ──────────────────────────────────────
-    track_summary_df = pd.DataFrame(last_result.get('track_summary', []))
-    enabled_flags = {
-        "enable_traffic": bool(enable_traffic),
-        "enable_speed": bool(enable_speed) and scale_mpp is not None,
-        "enable_od": bool(enable_od),
-        "enable_urban": bool(enable_urban),
-    }
-    ai_summary = build_analysis_summary(last_analysis, last_result, enabled_flags)
-    # ai_insight_state에 저장되는 스냅샷 — LLM 요약(llm_summary)과, AI 하이라이트를
-    # 다시 그릴 때 필요한 원본 Figure/DataFrame을 함께 담는다(출력 개수는 그대로 16개).
-    ai_insight_snapshot = {
-        "llm_summary": ai_summary,
-        "traffic_count_fig": traffic_count_fig,
-        "traffic_speed_fig": traffic_speed_fig,
-        "zone_df": zone_df,
-        "track_summary_df": track_summary_df,
-    }
+        batch_video_choices = gr.update(
+            choices=[pkg['label'] for pkg in packages],
+            value=last_pkg['label'],
+        )
 
-    # 16 outputs
+    # 18 outputs
     return (
-        last_result['video'],
-        last_result['csv'],
-        last_result['trajectory_img'],
+        last_pkg['video'],
+        last_pkg['csv'],
+        last_pkg['trajectory_img'],
         status,
-        traffic_count_fig,
-        traffic_speed_fig,
-        od_df,
-        last_result.get('heatmap_img'),
-        zone_df,
-        track_summary_df,
-        last_result.get('excel'),
-        last_result.get('charts'),
+        last_pkg['traffic_count_fig'],
+        last_pkg['traffic_speed_fig'],
+        last_pkg['od_df'],
+        last_pkg['heatmap_img'],
+        last_pkg['zone_df'],
+        last_pkg['track_summary_df'],
+        last_pkg['excel'],
+        last_pkg['charts'],
         session_out,
         batch_summary_df,
         batch_zip_path,
-        ai_insight_snapshot,
+        last_pkg['ai_insight_snapshot'],
+        packages,
+        batch_video_choices,
     )
 
 
@@ -637,6 +680,25 @@ def run_ai_insight(snapshot, provider, claude_model, claude_api_key, ollama_mode
     zone_styled = _highlight_dataframe(snapshot["zone_df"], highlights, "존", "zone_analysis")
     track_styled = _highlight_dataframe(snapshot["track_summary_df"], highlights, "class", "track_summary")
     return markdown, count_fig, speed_fig, zone_styled, track_styled
+
+
+def view_batch_video(packages, label):
+    """배치 처리 결과 중 사용자가 드롭다운에서 고른 영상의 패키지를 화면에 표시한다."""
+    if not packages or not label:
+        gr.Warning("선택할 영상이 없습니다. 먼저 배치 처리를 완료해주세요.")
+        return (gr.skip(),) * 14
+    pkg = next((p for p in packages if p["label"] == label), None)
+    if pkg is None:
+        gr.Warning("선택한 영상의 결과를 찾을 수 없습니다.")
+        return (gr.skip(),) * 14
+    return (
+        pkg["video"], pkg["csv"], pkg["trajectory_img"],
+        f"{label}  결과 표시 중",
+        pkg["traffic_count_fig"], pkg["traffic_speed_fig"], pkg["od_df"],
+        pkg["heatmap_img"], pkg["zone_df"], pkg["track_summary_df"],
+        pkg["excel"], pkg["charts"],
+        pkg["ai_insight_snapshot"], "",
+    )
 
 
 # ── CSS ───────────────────────────────────────────────────────────────────
@@ -1013,11 +1075,18 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                 'margin:24px 0 8px 0;line-height:1.5;display:block;">배치 처리 결과</p>'
             )
             gr.Markdown(
-                "배치 처리 시 영상별 처리 결과 요약과 전체 결과를 ZIP으로 다운로드할 수 있습니다.",
+                "배치 처리 시 영상별 처리 결과 요약과 전체 결과를 ZIP으로 다운로드할 수 있습니다. "
+                "위쪽 결과 영역에는 마지막 영상이 기본으로 표시되며, 아래에서 다른 영상을 골라 다시 확인할 수 있습니다.",
                 elem_classes="note",
             )
             batch_summary_df_out = gr.DataFrame(label="영상별 처리 요약")
             batch_zip_download   = gr.File(label="전체 결과 다운로드 (ZIP)")
+            with gr.Row():
+                batch_video_select = gr.Dropdown(
+                    label="결과를 확인할 영상 선택", choices=[], value=None, scale=3,
+                )
+                batch_view_btn = gr.Button("선택한 영상 결과 보기", scale=1)
+            batch_packages_state = gr.State(value=None)
 
     # ── Flatten widget lists ──────────────────────────────────────────────
     _line_inputs_flat = [w for tup in line_widgets for w in tup]   # 4×6 = 24
@@ -1032,7 +1101,8 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
         excel_download, charts_download, session_download,
         batch_summary_df_out, batch_zip_download,
         ai_insight_state,
-    ]  # 16 outputs
+        batch_packages_state, batch_video_select,
+    ]  # 18 outputs
 
     run_btn.click(
         fn=process_videos,
@@ -1068,7 +1138,7 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
     )
 
     video_input.clear(
-        fn=lambda: (None,) * 16,
+        fn=lambda: (None,) * 17 + (gr.update(choices=[], value=None),),
         inputs=[],
         outputs=_all_outputs,
     )
@@ -1092,6 +1162,18 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
         fn=lambda: gr.update(interactive=True, value="AI 인사이트 생성"),
         inputs=[],
         outputs=[ai_insight_btn],
+    )
+
+    batch_view_btn.click(
+        fn=view_batch_video,
+        inputs=[batch_packages_state, batch_video_select],
+        outputs=[
+            video_output, csv_download, summary_img, status_box,
+            traffic_count_plot, traffic_speed_plot, od_df_out,
+            heatmap_img_out, zone_df_out, track_summary_df_out,
+            excel_download, charts_download,
+            ai_insight_state, ai_insight_output,
+        ],
     )
 
     monitor_timer.tick(
