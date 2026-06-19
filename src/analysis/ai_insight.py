@@ -135,6 +135,18 @@ def _summarize_congestion(congestion_data: dict) -> dict:
     return {"events": events, "total_events": total}
 
 
+def _format_duration(duration_s: float) -> str:
+    """초 단위 길이를 "N분 M초"(1분 미만이면 "M초") 형태의 문자열로 변환한다.
+
+    LLM에게 분/초 환산을 직접 시키면(60으로 나누는 모듈러 연산) 가끔 틀린다 —
+    실제로 61.1초(=1분 1초)를 "61분 1초"로 잘못 환산해 보고한 사례가 있었음.
+    그래서 환산은 항상 여기서 미리 끝내고, 이미 포맷된 문자열만 LLM에 건넨다.
+    """
+    total_seconds = int(round(duration_s or 0))
+    minutes, seconds = divmod(total_seconds, 60)
+    return f"{minutes}분 {seconds}초" if minutes else f"{seconds}초"
+
+
 def build_analysis_summary(last_analysis: dict, last_result: dict, enabled_flags: dict) -> dict:
     """last_analysis/last_result로부터 LLM에 보낼 작은 JSON-safe 요약 dict를 만든다.
 
@@ -145,12 +157,14 @@ def build_analysis_summary(last_analysis: dict, last_result: dict, enabled_flags
     last_analysis = last_analysis or {}
     last_result = last_result or {}
     stats = last_result.get("stats", {}) or {}
+    duration_s = round(last_result.get("duration_s", 0) or 0, 1)
 
     summary = {
         "meta": {
             "total_frames": stats.get("total_frames"),
             "total_tracks": stats.get("total_tracks"),
-            "duration_s": round(last_result.get("duration_s", 0) or 0, 1),
+            "duration_s": duration_s,
+            "duration_formatted": _format_duration(duration_s),
             "enabled_analyses": {k: bool(v) for k, v in (enabled_flags or {}).items()},
         },
     }
@@ -209,6 +223,8 @@ def _prompt_preamble(summary: dict) -> tuple:
         "- 반드시 주어진 JSON 데이터에 근거해서만 서술하세요. 데이터에 없는 수치를 추측하거나 지어내지 마세요.\n"
         "- 데이터가 비어 있거나 패턴이 없는 섹션은 억지로 분석하지 말고 특이사항 없음을 짧게 언급하세요.\n"
         "- 숫자는 JSON 값을 그대로 인용하고 단위(km/h, 대/시, m, s 등)를 함께 표기하세요.\n"
+        "- 영상 길이를 언급할 때는 meta.duration_formatted 값을 그대로 가져와 쓰세요. "
+        "meta.duration_s(초 단위 원시값)를 분·초로 직접 환산하지 마세요 — 환산 과정에서 계산 오류가 날 수 있습니다.\n"
         "- 각 섹션을 2~5문장 또는 3~5개 불릿으로 간결하게 작성하세요.\n"
         "- track_summary는 클래스별 집계 통계이며 개별 트랙 데이터가 아님을 인지하고 해석하세요.\n"
     )

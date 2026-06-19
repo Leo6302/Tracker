@@ -1129,6 +1129,53 @@ session_out = str(session_path)   # is_batch 분기 없이 항상 실행
 
 ---
 
+### 16. AI 인사이트가 1분짜리 영상을 "61분 1초"라고 잘못 보고함
+
+- **증상**: 실제로는 약 1분(1833프레임, 30fps → 61.1초) 분량인 영상을 처리했는데, AI 인사이트 리포트에 "총 61분 1초 분량의 영상..."이라고 적힘 — 실제 길이의 61배.
+- **원인**: 데이터 자체는 정상이었음. Gradio 업로드 캐시에 남아있던 실제 영상 파일을 직접 `cv2`로 열어 확인한 결과 `fps=30, frame_count=1833` → `duration_s = 1833 / 30 = 61.1`(초)로 정확히 계산되어 있었음(1분 1.1초). 문제는 `build_analysis_summary()`(`src/analysis/ai_insight.py`)가 이 값을 `"duration_s": 61.1`(초 단위 원시 숫자)로만 Claude에 전달하고, 사람이 읽기 좋은 "N분 M초" 형태로 바꾸는 일을 Claude에게 맡겼다는 것 — Claude가 61.1을 60으로 나누는 환산(÷60)을 틀려서 "61분 1초"라고 적어버림. LLM에게 모듈러(÷60) 연산을 텍스트 생성 중에 시키면 이런 산술 오류가 종종 발생한다.
+- **검증**: 의심되는 원본 영상을 Gradio 임시 업로드 캐시(`%TEMP%\gradio\...`)에서 찾아 `cv2.VideoCapture`로 직접 열어 `fps`/`frame_count`를 확인 → `duration_s` 계산 자체가 옳다는 것을 먼저 확인한 뒤, 어디서 "61분"이 나왔는지를 역추적해 원인을 LLM 쪽 환산 오류로 좁힘.
+- **해결**: 분/초 환산을 LLM에게 시키지 않고 Python에서 미리 끝내, 이미 포맷된 문자열을 그대로 쓰라고 명시:
+
+```python
+# src/analysis/ai_insight.py
+def _format_duration(duration_s: float) -> str:
+    """초 단위 길이를 "N분 M초"(1분 미만이면 "M초") 형태의 문자열로 변환한다."""
+    total_seconds = int(round(duration_s or 0))
+    minutes, seconds = divmod(total_seconds, 60)
+    return f"{minutes}분 {seconds}초" if minutes else f"{seconds}초"
+
+
+def build_analysis_summary(last_analysis, last_result, enabled_flags) -> dict:
+    ...
+    duration_s = round(last_result.get("duration_s", 0) or 0, 1)
+    summary = {
+        "meta": {
+            "total_frames": stats.get("total_frames"),
+            "total_tracks": stats.get("total_tracks"),
+            "duration_s": duration_s,
+            "duration_formatted": _format_duration(duration_s),   # ← 신규
+            "enabled_analyses": {k: bool(v) for k, v in (enabled_flags or {}).items()},
+        },
+    }
+```
+
+프롬프트 지침(`_prompt_preamble()`의 `notes`)에 한 줄 추가:
+
+```python
+"- 영상 길이를 언급할 때는 meta.duration_formatted 값을 그대로 가져와 쓰세요. "
+"meta.duration_s(초 단위 원시값)를 분·초로 직접 환산하지 마세요 — 환산 과정에서 계산 오류가 날 수 있습니다.\n"
+```
+
+검증: `_format_duration(61.1)` → `"1분 1초"`, `_format_duration(3661.0)` → `"61분 1초"`(실제로 61분짜리 영상이면 이렇게 나오는 게 맞음), `_format_duration(119.6)` → `"2분 0초"`로 모두 정확히 환산됨을 확인.
+
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - `duration_s`는 그대로 남겨둠(다른 코드가 초 단위 정밀도를 원할 수 있으므로) — 다만 프롬프트에는 "이 값으로 분·초를 직접 계산하지 말 것"이라는 지침이 반드시 함께 있어야 함. 필드만 추가하고 지침을 안 넣으면 모델이 여전히 `duration_s`를 보고 직접 환산을 시도할 수 있음.
+  - 이런 부류의 버그(LLM이 받은 숫자를 변환하다가 산술을 틀리는 것)는 데이터 파이프라인을 아무리 들여다봐도 안 보임 — 실제 입력 영상의 메타데이터를 직접 확인해 "우리가 보낸 숫자가 맞다"는 것부터 확인하고, 그 다음 "LLM이 그 숫자를 어떻게 잘못 다뤘는지"로 좁혀가는 순서가 중요함.
+  - `_format_duration`은 `round()`로 반올림한 정수 초를 기준으로 분·초를 나누므로, 0.5초 미만의 오차는 무시됨(리포트용 표시이므로 문제 없음).
+- **파일**: `src/analysis/ai_insight.py`
+
+---
+
 ## 라이선스
 
 MIT
