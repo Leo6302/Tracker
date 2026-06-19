@@ -1,8 +1,15 @@
-"""Claude API를 이용해 분석 결과(last_analysis/last_result)를 한국어 해설로 요약한다.
+"""분석 결과(last_analysis/last_result)를 LLM(Claude API 또는 로컬 Ollama)으로 한국어
+해설로 요약한다.
 
-이 모듈은 Gradio·네트워크 의존성이 없는 build_analysis_summary()와, anthropic SDK를
-호출하는 generate_insight()로 나뉜다. 전자는 process_videos() 내부에서 즉시 호출해도
-지연이 없고, 후자는 "AI 인사이트 생성" 버튼 클릭 시에만 호출된다.
+이 모듈은 Gradio·네트워크 의존성이 없는 build_analysis_summary()와, 실제 LLM을 호출하는
+generate_insight()(provider에 따라 _generate_with_claude/_generate_with_ollama로 분기)로
+나뉜다. 전자는 process_videos() 내부에서 즉시 호출해도 지연이 없고, 후자는 "AI 인사이트
+생성" 버튼 클릭 시에만 호출된다.
+
+Claude는 구조화 출력(JSON 스키마)으로 report_markdown + highlights(차트/표에 표시할 메모)를
+함께 받는다. 로컬 모델은 JSON 형식 준수가 불안정할 수 있어 텍스트 리포트만 받고
+highlights는 항상 빈 리스트다 — generate_insight()는 두 경로 모두
+{"report_markdown": str, "highlights": list} 형태로 반환을 통일한다.
 """
 import json
 
@@ -10,7 +17,38 @@ from .session import _NumpyEncoder
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 MODEL_CHOICES = ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"]
-MAX_TOKENS = 2048
+MAX_TOKENS = 3072  # report_markdown + highlights JSON을 함께 받으므로 기존 2048보다 여유를 둠
+
+DEFAULT_OLLAMA_MODEL = "exaone3.5:7.8b"
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+
+_CATEGORY_LABELS = {
+    "counting_lines": "교통", "speed": "속도", "zone_analysis": "존",
+    "od_matrix": "OD", "congestion": "혼잡", "track_summary": "트랙",
+}
+
+OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "report_markdown": {"type": "string"},
+        "highlights": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "enum": list(_CATEGORY_LABELS)},
+                    "target": {"type": "string"},
+                    "note": {"type": "string"},
+                    "importance": {"type": "string", "enum": ["high", "medium"]},
+                },
+                "required": ["category", "target", "note", "importance"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["report_markdown", "highlights"],
+    "additionalProperties": False,
+}
 
 
 class AIInsightError(Exception):
@@ -137,7 +175,7 @@ def build_analysis_summary(last_analysis: dict, last_result: dict, enabled_flags
 
 # ── 프롬프트 구성 ────────────────────────────────────────────────────────────
 
-def _build_system_prompt(summary: dict) -> str:
+def _report_sections(summary: dict) -> list:
     sections = ["핵심 요약 — 전체 분석 결과를 2~3문장으로 요약"]
 
     if "counting_lines" in summary:
@@ -153,7 +191,11 @@ def _build_system_prompt(summary: dict) -> str:
 
     sections.append("트랙 요약 해석 — 클래스별 트랙 수, 이동거리, 속도에서 보이는 경향")
     sections.append("권장사항 — 데이터에 기반한 실행 가능한 제안 2~4개")
+    return sections
 
+
+def _prompt_preamble(summary: dict) -> tuple:
+    sections = _report_sections(summary)
     section_list = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(sections))
 
     role = "당신은 차량 및 보행자 영상 추적 데이터를 해석하는 교통 및 도시공간 분석 전문가입니다."
@@ -162,7 +204,6 @@ def _build_system_prompt(summary: dict) -> str:
         "하나의 영상을 처리한 결과를 요약한 JSON 데이터가 주어집니다. 이 데이터를 바탕으로 "
         "한국어로 구조화된 분석 리포트를 작성하세요."
     )
-    format_instruction = "리포트는 다음 섹션을 마크다운 헤더(##)로 구성하세요:"
     notes = (
         "작성 시 주의사항:\n"
         "- 반드시 주어진 JSON 데이터에 근거해서만 서술하세요. 데이터에 없는 수치를 추측하거나 지어내지 마세요.\n"
@@ -171,47 +212,108 @@ def _build_system_prompt(summary: dict) -> str:
         "- 각 섹션을 2~5문장 또는 3~5개 불릿으로 간결하게 작성하세요.\n"
         "- track_summary는 클래스별 집계 통계이며 개별 트랙 데이터가 아님을 인지하고 해석하세요.\n"
     )
+    return role, context, section_list, notes
 
+
+def _build_text_system_prompt(summary: dict) -> str:
+    """로컬 Ollama용 — 마크다운 리포트 텍스트만 요청(JSON 래핑 없음)."""
+    role, context, section_list, notes = _prompt_preamble(summary)
+    format_instruction = "리포트는 다음 섹션을 마크다운 헤더(##)로 구성하세요:"
     return f"{role}\n\n{context}\n\n{format_instruction}\n\n{section_list}\n\n{notes}"
+
+
+def _build_structured_system_prompt(summary: dict) -> str:
+    """Claude용 — report_markdown(위와 동일한 리포트) + highlights 배열을 함께 요청."""
+    role, context, section_list, notes = _prompt_preamble(summary)
+    format_instruction = (
+        "응답은 report_markdown과 highlights 두 필드를 가진 JSON으로 작성하세요. "
+        "report_markdown에는 다음 섹션을 마크다운 헤더(##)로 구성한 리포트를 담으세요:"
+    )
+    highlights_instruction = (
+        "추가로 highlights 배열에는, 데이터에 실제로 존재하는 라벨(클래스명/존 이름/감지선 이름)을 "
+        "정확히 그대로 사용해 가장 주목할 만한 데이터 포인트 3~6개를 뽑아 담으세요. "
+        "각 항목은 연구 방향을 제시할 수 있는 이상치·특이 패턴·실행 가능한 시사점이어야 하며, "
+        "category는 해당 데이터가 속한 항목"
+        "(counting_lines/speed/zone_analysis/od_matrix/congestion/track_summary) 중 "
+        "이 요약에 실제로 존재하는 것만 사용하세요. target에 존재하지 않는 라벨을 지어내지 마세요."
+    )
+    return f"{role}\n\n{context}\n\n{format_instruction}\n\n{section_list}\n\n{notes}\n\n{highlights_instruction}"
 
 
 def _build_user_message(summary: dict) -> str:
     return json.dumps(summary, ensure_ascii=False, indent=2, cls=_NumpyEncoder)
 
 
-# ── Claude API 호출 ─────────────────────────────────────────────────────────
+def render_insight_markdown(result: dict) -> str:
+    """generate_insight()의 결과를 패널에 표시할 최종 마크다운 문자열로 합친다.
 
-def generate_insight(summary: dict, model: str = DEFAULT_MODEL, api_key: str | None = None) -> str:
-    """summary를 Claude API에 보내 한국어 해설 텍스트를 받아온다.
+    highlights가 있으면(Claude 경로) 맨 위에 강조점 블록을 추가하고, 없으면(Ollama
+    경로, 또는 Claude가 하이라이트를 찾지 못한 경우) report_markdown만 그대로 반환한다.
+    """
+    highlights = result.get("highlights") or []
+    report = result.get("report_markdown", "")
+    if not highlights:
+        return report
+
+    lines = ["## 🔍 주목할 포인트 (연구 방향성 힌트)", ""]
+    ordered = sorted(highlights, key=lambda h: 0 if h.get("importance") == "high" else 1)
+    for h in ordered:
+        mark = "🔴" if h.get("importance") == "high" else "🔵"
+        label = _CATEGORY_LABELS.get(h.get("category"), h.get("category", ""))
+        lines.append(f"- {mark} **[{label}] {h.get('target', '')}** — {h.get('note', '')}")
+    lines.append("\n---\n")
+    return "\n".join(lines) + report
+
+
+# ── LLM 호출 ─────────────────────────────────────────────────────────────────
+
+def generate_insight(
+    summary: dict,
+    provider: str = "claude",
+    *,
+    model: str = DEFAULT_MODEL,
+    api_key: str | None = None,
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    ollama_host: str = DEFAULT_OLLAMA_HOST,
+) -> dict:
+    """summary를 LLM에 보내 해설을 받아온다.
+
+    provider="claude"면 Anthropic API를 구조화 출력으로 호출해 {"report_markdown",
+    "highlights"}를 받고, provider="ollama"면 로컬 Ollama 서버를 호출해 텍스트
+    리포트만 받는다(highlights는 항상 []). 두 경로 모두 같은 모양의 dict를 반환한다.
 
     실패 시 사용자에게 보여줄 수 있는 한국어 메시지를 담은 AIInsightError를 발생시킨다.
     예상치 못한 예외(진짜 버그)는 그대로 전파된다.
     """
+    if provider == "ollama":
+        return _generate_with_ollama(summary, ollama_model, ollama_host)
+    return _generate_with_claude(summary, model, api_key)
+
+
+def _generate_with_claude(summary: dict, model: str, api_key: str | None) -> dict:
     import os
 
     api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise AIInsightError(
-            "ANTHROPIC_API_KEY가 설정되지 않았습니다. "
-            ".env 파일에 ANTHROPIC_API_KEY=sk-ant-... 를 추가하거나 "
-            "환경 변수로 설정한 뒤 다시 시도해주세요."
+            "Anthropic API 키가 없습니다. 위 'Anthropic API 키' 입력란에 붙여넣거나 "
+            ".env 파일에 ANTHROPIC_API_KEY=sk-ant-... 를 추가한 뒤 다시 시도해주세요."
         )
 
     import anthropic  # 지연 임포트: anthropic 패키지를 선택적 의존성으로 취급
 
     client = anthropic.Anthropic(api_key=api_key)
-    system_prompt = _build_system_prompt(summary)
-    user_message = _build_user_message(summary)
 
     try:
         response = client.messages.create(
             model=model,
             max_tokens=MAX_TOKENS,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
+            system=_build_structured_system_prompt(summary),
+            messages=[{"role": "user", "content": _build_user_message(summary)}],
+            output_config={"format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
         )
     except anthropic.AuthenticationError:
-        raise AIInsightError("Claude API 인증에 실패했습니다. ANTHROPIC_API_KEY가 올바른지 확인해주세요.")
+        raise AIInsightError("Claude API 인증에 실패했습니다. API 키가 올바른지 확인해주세요.")
     except anthropic.RateLimitError:
         raise AIInsightError("Claude API 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.")
     except anthropic.APIStatusError as e:
@@ -222,7 +324,48 @@ def generate_insight(summary: dict, model: str = DEFAULT_MODEL, api_key: str | N
     if response.stop_reason == "refusal":
         raise AIInsightError("Claude가 이 요청에 대한 응답을 거부했습니다. 데이터를 확인 후 다시 시도해주세요.")
 
-    text = "".join(block.text for block in response.content if block.type == "text").strip()
+    text = next((block.text for block in response.content if block.type == "text"), "")
     if not text:
         raise AIInsightError("Claude로부터 빈 응답을 받았습니다. 다시 시도해주세요.")
-    return text
+
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        raise AIInsightError("Claude 응답을 해석할 수 없습니다. 다시 시도해주세요.")
+    result.setdefault("highlights", [])
+    return result
+
+
+def _generate_with_ollama(summary: dict, model: str, host: str) -> dict:
+    import httpx  # 지연 임포트: anthropic의 전이 의존성이라 항상 설치돼 있지만 일관성 유지
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _build_text_system_prompt(summary)},
+            {"role": "user", "content": _build_user_message(summary)},
+        ],
+        "stream": False,
+    }
+
+    try:
+        resp = httpx.post(f"{host.rstrip('/')}/api/chat", json=payload, timeout=120.0)
+    except httpx.ConnectError:
+        raise AIInsightError(
+            f"로컬 Ollama 서버({host})에 연결할 수 없습니다. Ollama를 설치·실행한 뒤 다시 시도해주세요."
+        )
+    except httpx.TimeoutException:
+        raise AIInsightError("Ollama 응답 시간이 초과되었습니다. 더 작은 모델을 사용해보세요.")
+
+    if resp.status_code == 404:
+        raise AIInsightError(
+            f"Ollama 모델 '{model}'을 찾을 수 없습니다. "
+            f"터미널에서 `ollama pull {model}` 실행 후 다시 시도해주세요."
+        )
+    if resp.status_code != 200:
+        raise AIInsightError(f"Ollama 오류가 발생했습니다 (status={resp.status_code}).")
+
+    text = (resp.json().get("message") or {}).get("content", "").strip()
+    if not text:
+        raise AIInsightError("Ollama로부터 빈 응답을 받았습니다. 다시 시도해주세요.")
+    return {"report_markdown": text, "highlights": []}

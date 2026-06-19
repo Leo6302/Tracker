@@ -1,5 +1,6 @@
 import sys
 import json
+import copy
 import tempfile
 import zipfile
 from pathlib import Path
@@ -20,8 +21,8 @@ from src.prediction.trainer import pretrain_model
 from src.device_utils import detect_devices
 from src.analysis.session import AnalysisSession, SessionConfig
 from src.analysis.ai_insight import (
-    build_analysis_summary, generate_insight, AIInsightError,
-    DEFAULT_MODEL, MODEL_CHOICES,
+    build_analysis_summary, generate_insight, render_insight_markdown, AIInsightError,
+    DEFAULT_MODEL, MODEL_CHOICES, DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_HOST,
 )
 
 import psutil
@@ -225,6 +226,54 @@ def _make_speed_chart(speed_data):
         margin=dict(t=60, b=50, l=60, r=20),
     )
     return fig
+
+
+def _annotate_chart(fig, highlights, category, xref="x", yref="y domain"):
+    """AI 하이라이트 중 category에 해당하는 항목을 fig 위에 작은 배지로 표시한다.
+
+    원본 fig는 건드리지 않고 깊은 복사본에 주석을 추가해 반환 — 재생성할 때마다
+    이전 주석이 누적되지 않도록 항상 process_videos()가 만든 원본에서 다시 그린다.
+    """
+    if fig is None or not highlights:
+        return fig
+    targets = [h for h in highlights if h.get("category") == category]
+    if not targets:
+        return fig
+    fig = copy.deepcopy(fig)
+    for h in targets:
+        color = "#b45309" if h.get("importance") == "high" else "#1d4ed8"
+        fig.add_annotation(
+            x=h.get("target"), y=1.08, xref=xref, yref=yref,
+            text=f"💡 {h.get('note', '')}", showarrow=False,
+            font=dict(size=10, color="#fff"), bgcolor=color,
+            borderpad=4, xanchor="center",
+        )
+    return fig
+
+
+def _highlight_dataframe(df, highlights, match_column, category):
+    """AI 하이라이트 중 category에 해당하는 항목을 df에 "AI 메모" 컬럼으로 덧붙이고,
+    일치하는 행에 배경색을 입힌 pandas Styler를 반환한다.
+
+    match_column 값이 하이라이트의 target과 일치하지 않으면 그 행은 그대로 둔다.
+    """
+    if df is None or df.empty:
+        return df
+    targets = {h["target"]: h for h in highlights if h.get("category") == category}
+    if not targets:
+        return df
+
+    df = df.copy()
+    df["AI 메모"] = df[match_column].map(lambda v: targets.get(v, {}).get("note", ""))
+
+    def _row_style(row):
+        h = targets.get(row[match_column])
+        if not h:
+            return [""] * len(row)
+        color = "#fef3c7" if h.get("importance") == "high" else "#eff6ff"
+        return [f"background-color: {color}"] * len(row)
+
+    return df.style.apply(_row_style, axis=1)
 
 
 # ── process_videos ────────────────────────────────────────────────────────
@@ -470,6 +519,7 @@ def process_videos(
         batch_zip_path = str(zip_tmp)
 
     # ── AI 인사이트용 요약 데이터 ──────────────────────────────────────
+    track_summary_df = pd.DataFrame(last_result.get('track_summary', []))
     enabled_flags = {
         "enable_traffic": bool(enable_traffic),
         "enable_speed": bool(enable_speed) and scale_mpp is not None,
@@ -477,6 +527,15 @@ def process_videos(
         "enable_urban": bool(enable_urban),
     }
     ai_summary = build_analysis_summary(last_analysis, last_result, enabled_flags)
+    # ai_insight_state에 저장되는 스냅샷 — LLM 요약(llm_summary)과, AI 하이라이트를
+    # 다시 그릴 때 필요한 원본 Figure/DataFrame을 함께 담는다(출력 개수는 그대로 16개).
+    ai_insight_snapshot = {
+        "llm_summary": ai_summary,
+        "traffic_count_fig": traffic_count_fig,
+        "traffic_speed_fig": traffic_speed_fig,
+        "zone_df": zone_df,
+        "track_summary_df": track_summary_df,
+    }
 
     # 16 outputs
     return (
@@ -489,13 +548,13 @@ def process_videos(
         od_df,
         last_result.get('heatmap_img'),
         zone_df,
-        pd.DataFrame(last_result.get('track_summary', [])),
+        track_summary_df,
         last_result.get('excel'),
         last_result.get('charts'),
         session_out,
         batch_summary_df,
         batch_zip_path,
-        ai_summary,
+        ai_insight_snapshot,
     )
 
 
@@ -544,15 +603,29 @@ def restore_session(session_file):
     )
 
 
-def run_ai_insight(ai_summary, model):
-    if not ai_summary:
+def run_ai_insight(snapshot, provider, claude_model, claude_api_key, ollama_model, ollama_host):
+    if not snapshot:
         gr.Warning("먼저 영상을 처리해주세요. 분석 결과가 없습니다.")
-        return gr.skip()
+        return (gr.skip(),) * 5
+
+    provider_key = "ollama" if provider == "로컬 (Ollama)" else "claude"
     try:
-        return generate_insight(ai_summary, model=model)
+        result = generate_insight(
+            snapshot["llm_summary"], provider=provider_key,
+            model=claude_model, api_key=(claude_api_key or None),
+            ollama_model=ollama_model, ollama_host=ollama_host,
+        )
     except AIInsightError as e:
         gr.Warning(str(e))
-        return gr.skip()
+        return (gr.skip(),) * 5
+
+    highlights = result.get("highlights") or []
+    markdown = render_insight_markdown(result)
+    count_fig = _annotate_chart(snapshot["traffic_count_fig"], highlights, "counting_lines")
+    speed_fig = _annotate_chart(snapshot["traffic_speed_fig"], highlights, "speed")
+    zone_styled = _highlight_dataframe(snapshot["zone_df"], highlights, "존", "zone_analysis")
+    track_styled = _highlight_dataframe(snapshot["track_summary_df"], highlights, "class", "track_summary")
+    return markdown, count_fig, speed_fig, zone_styled, track_styled
 
 
 # ── CSS ───────────────────────────────────────────────────────────────────
@@ -849,30 +922,57 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
 
             with gr.Accordion("도시 분석 결과", open=False):
                 heatmap_img_out = gr.Image(label="밀도 열지도", type="filepath")
-                zone_df_out = gr.DataFrame(label="존 분석  (체류시간 · 밀도)")
+                zone_df_out = gr.DataFrame(label="존 분석  (체류시간 · 밀도)", interactive=False)
 
             with gr.Accordion("트랙 요약", open=True):
                 gr.Markdown(
                     "추적된 개별 객체(트랙)별 이동 경로 요약입니다. 진입·퇴장 프레임, 이동 거리, 속도를 확인할 수 있습니다.",
                     elem_classes="note",
                 )
-                track_summary_df_out = gr.DataFrame(label="트랙별 요약")
+                track_summary_df_out = gr.DataFrame(label="트랙별 요약", interactive=False)
 
                 gr.Markdown(
-                    "**AI 인사이트** — Claude가 위 분석 결과를 바탕으로 핵심 패턴, 혼잡 구간, "
-                    "권장사항 등을 한국어로 요약합니다. 별도 API 비용이 발생하므로 버튼을 눌렀을 때만 호출됩니다.",
+                    "**AI 인사이트** — Claude API 또는 로컬 AI(Ollama)로 분석 결과를 한국어로 해설합니다. "
+                    "주목할 데이터는 강조점으로 모아 보여주고(Claude만), 해당 차트·표에도 함께 표시됩니다.",
                     elem_classes="note",
                 )
-                with gr.Row():
+                ai_provider_radio = gr.Radio(
+                    choices=["Claude API", "로컬 (Ollama)"], value="Claude API", label="AI 제공자",
+                )
+                with gr.Group(visible=True) as claude_group:
                     ai_model_dropdown = gr.Dropdown(
-                        choices=MODEL_CHOICES,
-                        value=DEFAULT_MODEL,
-                        label="Claude 모델",
-                        scale=2,
+                        choices=MODEL_CHOICES, value=DEFAULT_MODEL, label="Claude 모델",
                     )
-                    ai_insight_btn = gr.Button("AI 인사이트 생성", variant="secondary", scale=1)
+                    ai_api_key_box = gr.Textbox(
+                        label="Anthropic API 키 (선택)", type="password",
+                        placeholder="sk-ant-... (비워두면 .env의 ANTHROPIC_API_KEY 사용)",
+                    )
+                with gr.Group(visible=False) as ollama_group:
+                    gr.Markdown(
+                        "[Ollama 설치](https://ollama.com/download) 후 터미널에서 "
+                        f"`ollama pull {DEFAULT_OLLAMA_MODEL}` 실행 (한국어 지원, 약 4.8GB). "
+                        "API 키 불필요, 인터넷 연결도 불필요합니다.",
+                        elem_classes="note",
+                    )
+                    with gr.Row():
+                        ai_ollama_model_box = gr.Textbox(
+                            value=DEFAULT_OLLAMA_MODEL, label="Ollama 모델", scale=2,
+                        )
+                        ai_ollama_host_box = gr.Textbox(
+                            value=DEFAULT_OLLAMA_HOST, label="Ollama 주소", scale=1,
+                        )
+                ai_insight_btn = gr.Button("AI 인사이트 생성", variant="secondary")
                 ai_insight_output = gr.Markdown(value="", elem_classes="note")
                 ai_insight_state = gr.State(value=None)
+
+                ai_provider_radio.change(
+                    fn=lambda p: (
+                        gr.update(visible=(p == "Claude API")),
+                        gr.update(visible=(p == "로컬 (Ollama)")),
+                    ),
+                    inputs=[ai_provider_radio],
+                    outputs=[claude_group, ollama_group],
+                )
 
             gr.HTML(
                 '<p style="font-size:14px;font-weight:700;letter-spacing:0.09em;'
@@ -956,8 +1056,15 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
 
     ai_insight_btn.click(
         fn=run_ai_insight,
-        inputs=[ai_insight_state, ai_model_dropdown],
-        outputs=[ai_insight_output],
+        inputs=[
+            ai_insight_state, ai_provider_radio,
+            ai_model_dropdown, ai_api_key_box,
+            ai_ollama_model_box, ai_ollama_host_box,
+        ],
+        outputs=[
+            ai_insight_output, traffic_count_plot, traffic_speed_plot,
+            zone_df_out, track_summary_df_out,
+        ],
     )
 
     monitor_timer.tick(

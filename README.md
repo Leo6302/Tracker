@@ -703,13 +703,127 @@ ai_insight_btn.click(fn=run_ai_insight, inputs=[ai_insight_state, ai_model_dropd
 `gr.Markdown`을 출력 컴포넌트로 쓴 이유는 Claude 응답의 `##` 헤더·불릿이 `gr.Textbox`에서는 `#`/`-` 글자 그대로 보이기 때문(Markdown은 실제 HTML로 렌더링). `gr.Warning` + `gr.skip()` 조합은 키 누락·인증 실패·한도 초과 등 예상 가능한 실패에서 토스트만 띄우고 이전 결과를 지우지 않기 위함 — `AIInsightError`가 아닌 예외(진짜 버그)는 잡지 않고 그대로 전파됨.
 
 - **주의 (재현 시 흔히 빠지는 함정)**:
-  - `ANTHROPIC_API_KEY`는 **반드시** `.env` 파일(`.gitignore`에 이미 포함됨) 또는 OS 환경변수로만 설정. UI 입력 필드나 `SessionConfig`(세션 JSON)에 절대 추가하지 말 것 — 세션 파일을 공유하면 키가 새어나갈 수 있음.
+  - `ANTHROPIC_API_KEY`는 **반드시** `.env` 파일(`.gitignore`에 이미 포함됨) 또는 OS 환경변수로만 설정. `SessionConfig`(세션 JSON)에는 절대 추가하지 말 것 — 세션 파일을 공유하면 키가 새어나갈 수 있음. (※ 항목 12에서 UI 입력 필드가 추가되지만, 그 값은 브라우저 세션 동안만 유지되고 디스크에는 쓰지 않음 — 이 원칙은 유지됨)
   - `app.py` 상단에 `from dotenv import load_dotenv; load_dotenv()`를 다른 임포트보다 먼저 실행해야 `ANTHROPIC_API_KEY`가 `generate_insight()` 호출 시점에 채워져 있음.
   - 출력 개수 15 → 16 변경은 **세 곳**(최종 `return` 튜플, `_all_outputs` 리스트, `video_input.clear()`의 `(None,) * N`)을 모두 같이 고쳐야 함. 하나라도 빠뜨리면 Gradio가 "Number of output components does not match" 에러를 던짐. `restore_session()`의 `(gr.skip(),) * 68`은 입력 위젯만 다루므로 영향 없음.
   - `track_summary`는 트랙별 원시 행이 아니라 **클래스별 집계**(`_summarize_track_summary`)만 LLM에 전달됨 — 추적 객체가 수백 개여도 전송량은 클래스 수(보통 2~5개)만큼만 늘어남.
   - `anthropic` 패키지는 `generate_insight()` 내부에서 지연 임포트(`import anthropic`)됨 — 설치가 안 돼 있어도 앱 시작 자체는 깨지지 않고, 버튼을 눌렀을 때만 에러가 남.
   - `thinking`/`output_config.effort`는 의도적으로 사용하지 않음 — 이미 집계된 1~5KB JSON을 요약하는 단발성 작업이라 추론 단계가 품질에 도움이 되지 않고, 비용·지연만 늘어남.
 - **파일**: `requirements.txt`, `src/analysis/ai_insight.py` (신규), `app.py`
+
+### 12. AI 인사이트가 텍스트로만 분리돼 있고, Claude 계정 없는 사용자는 기능을 못 씀
+
+- **증상 1 — 차트/표와 분리된 해설**: 항목 11에서 추가한 AI 인사이트는 단일 마크다운 텍스트 블록뿐이라, 어떤 데이터가 왜 주목할 만한지가 차트·표 위에서는 전혀 드러나지 않음.
+- **증상 2 — Claude API 키 필수**: API 키가 없거나 Claude 계정이 없는 사용자는 기능 자체를 쓸 수 없음. `.env` 파일을 직접 편집해야 하는 것도 진입장벽.
+- **해결**: ① Claude를 **구조화 출력**(`output_config.format` JSON 스키마)으로 호출해 `report_markdown`(기존과 동일한 전체 해설)과 `highlights`(차트·표에 표시할 메모 배열)를 함께 받음. ② API 키를 UI에서 직접 입력할 수 있는 비밀번호 필드 추가(세션 동안만 유지, `.env` 값은 폴백). ③ **로컬 Ollama**를 두 번째 AI 제공자로 추가해 키 없이도 기능을 쓸 수 있게 함(텍스트 리포트만, 하이라이트는 Claude 전용).
+
+**`src/analysis/ai_insight.py` — `generate_insight()` 반환 타입 변경(str → dict)**:
+
+```python
+DEFAULT_OLLAMA_MODEL = "exaone3.5:7.8b"   # LG AI연구원, 한국어/영어 이중언어, 4.8GB
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+MAX_TOKENS = 3072  # 기존 2048 → highlights JSON 포함 여유분
+
+OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "report_markdown": {"type": "string"},
+        "highlights": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "enum": [
+                        "counting_lines", "speed", "zone_analysis",
+                        "od_matrix", "congestion", "track_summary",
+                    ]},
+                    "target": {"type": "string"},   # 데이터에 실제로 존재하는 라벨(클래스명/존 이름 등)
+                    "note": {"type": "string"},
+                    "importance": {"type": "string", "enum": ["high", "medium"]},
+                },
+                "required": ["category", "target", "note", "importance"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["report_markdown", "highlights"],
+    "additionalProperties": False,
+}
+
+def generate_insight(summary, provider="claude", *, model=DEFAULT_MODEL, api_key=None,
+                      ollama_model=DEFAULT_OLLAMA_MODEL, ollama_host=DEFAULT_OLLAMA_HOST) -> dict:
+    if provider == "ollama":
+        return _generate_with_ollama(summary, ollama_model, ollama_host)
+    return _generate_with_claude(summary, model, api_key)
+```
+
+Claude 경로는 `output_config={"format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}}`을 붙여 응답이 항상 스키마를 만족하는 JSON임을 보장받고 `json.loads()`만 함. Ollama 경로(`httpx.post(f"{host}/api/chat", json={...}, timeout=120.0)`)는 JSON 강제 없이 같은 섹션 구성의 마크다운 텍스트만 요청하고 `highlights`는 항상 `[]`로 채워 반환 모양을 통일함(`anthropic`의 전이 의존성으로 이미 설치돼 있던 `httpx`를 그대로 재사용 — 새 의존성 없음).
+
+**`app.py` — 이미 그린 Figure/DataFrame에 AI 메모를 덧붙이는 두 헬퍼**(차트/표 본체 함수는 손대지 않음):
+
+```python
+def _annotate_chart(fig, highlights, category, xref="x", yref="y domain"):
+    if fig is None or not highlights:
+        return fig
+    targets = [h for h in highlights if h.get("category") == category]
+    if not targets:
+        return fig
+    fig = copy.deepcopy(fig)   # 원본은 그대로 두고 복사본에만 주석 추가 — 재생성 시 누적 방지
+    for h in targets:
+        color = "#b45309" if h.get("importance") == "high" else "#1d4ed8"
+        fig.add_annotation(
+            x=h.get("target"), y=1.08, xref=xref, yref=yref,
+            text=f"💡 {h.get('note', '')}", showarrow=False,
+            font=dict(size=10, color="#fff"), bgcolor=color,
+            borderpad=4, xanchor="center",
+        )
+    return fig
+
+def _highlight_dataframe(df, highlights, match_column, category):
+    if df is None or df.empty:
+        return df
+    targets = {h["target"]: h for h in highlights if h.get("category") == category}
+    if not targets:
+        return df
+    df = df.copy()
+    df["AI 메모"] = df[match_column].map(lambda v: targets.get(v, {}).get("note", ""))
+    def _row_style(row):
+        h = targets.get(row[match_column])
+        if not h:
+            return [""] * len(row)
+        color = "#fef3c7" if h.get("importance") == "high" else "#eff6ff"
+        return [f"background-color: {color}"] * len(row)
+    return df.style.apply(_row_style, axis=1)
+```
+통과수/유량 차트는 서브플롯 1("클래스별 통과 수")에만 주석을 단다(서브플롯 2와 x축 카테고리가 같아 중복 표시할 필요 없음). `gr.DataFrame`(Gradio 6.14.0 확인)은 pandas `Styler` 객체를 그대로 받아 셀 배경색을 렌더링하지만, **`interactive=False`일 때만** 동작하므로 `zone_df_out`/`track_summary_df_out` 선언에 `interactive=False`를 명시적으로 추가했음. OD 행렬은 행×열 쌍 매칭이 필요해 복잡도가 커서 v1에서는 제외(텍스트 강조점에는 포함됨).
+
+**`process_videos()` — 출력 개수는 그대로 16개**: 차트를 다시 그리려면 원본 Figure/DataFrame이 필요한데, 이를 새 `gr.State` 슬롯으로 추가하지 않고 **기존 `ai_insight_state`에 저장하는 값의 모양만 dict로 확장**했음(`{"llm_summary":..., "traffic_count_fig":..., "traffic_speed_fig":..., "zone_df":..., "track_summary_df":...}`). `track_summary_df`는 기존에 `return` 문 안에서 인라인으로 한 번 더 만들던 것을 변수로 추출해 한 번만 생성하도록 바꿈.
+
+**UI — 제공자 라디오 + 조건부 그룹**:
+```python
+ai_provider_radio = gr.Radio(choices=["Claude API", "로컬 (Ollama)"], value="Claude API", label="AI 제공자")
+with gr.Group(visible=True) as claude_group:
+    ai_model_dropdown = gr.Dropdown(choices=MODEL_CHOICES, value=DEFAULT_MODEL, label="Claude 모델")
+    ai_api_key_box = gr.Textbox(label="Anthropic API 키 (선택)", type="password",
+                                 placeholder="sk-ant-... (비워두면 .env의 ANTHROPIC_API_KEY 사용)")
+with gr.Group(visible=False) as ollama_group:
+    ai_ollama_model_box = gr.Textbox(value=DEFAULT_OLLAMA_MODEL, label="Ollama 모델")
+    ai_ollama_host_box = gr.Textbox(value=DEFAULT_OLLAMA_HOST, label="Ollama 주소")
+
+ai_provider_radio.change(
+    fn=lambda p: (gr.update(visible=(p == "Claude API")), gr.update(visible=(p == "로컬 (Ollama)"))),
+    inputs=[ai_provider_radio], outputs=[claude_group, ollama_group],
+)
+```
+`run_ai_insight()`의 입력이 1개(모델명)에서 6개(스냅샷·제공자·Claude 모델·API 키·Ollama 모델·Ollama 주소)로, 출력이 1개(텍스트)에서 5개(텍스트 + 통과수 차트 + 속도 차트 + 존 표 + 트랙 표)로 늘어남. 실패 시(`AIInsightError`, 또는 스냅샷 없음) 5개 출력 모두 `gr.skip()`을 반환해 이전 결과를 보존.
+
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - `interactive=False`를 빠뜨리면 Gradio가 Styler를 무시하고 일반 값으로 렌더링해 배경색이 안 보일 수 있음 — `zone_df_out`/`track_summary_df_out` 둘 다 확인.
+  - `_annotate_chart`/`_highlight_dataframe`는 항상 `ai_insight_state`에 저장된 **원본**(`process_videos()`가 만든 깨끗한 버전)에서 시작해야 함. `run_ai_insight()`가 반환한 이전 결과(이미 주석이 붙은 Figure)를 다시 입력으로 쓰면 안 됨 — 그래서 스냅샷을 따로 보관함.
+  - 로컬 모델은 `highlights`가 항상 `[]`이므로 `render_insight_markdown()`이 자동으로 "🔍 주목할 포인트" 블록 없이 `report_markdown`만 반환함 — 별도 분기 불필요.
+  - Ollama 모델 태그는 정확히 일치해야 함(`exaone3.5:7.8b`처럼 크기까지 포함). 모델을 `ollama pull` 하지 않은 상태로 호출하면 404가 와서 "pull 실행" 안내 경고가 뜸.
+  - UI의 API 키 입력란은 비워두면 `.env`/환경변수로 자동 폴백하고, 값을 입력하면 그 값이 우선됨 — `generate_insight(..., api_key=(claude_api_key or None))`로 빈 문자열을 `None`으로 변환해야 폴백이 정상 동작함.
+- **파일**: `requirements.txt`, `src/analysis/ai_insight.py`, `app.py`
 
 ---
 

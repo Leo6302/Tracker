@@ -16,3 +16,4 @@ gputil
 imageio-ffmpeg  # optional: enables H.264 re-encoding for in-browser video playback
 anthropic
 python-dotenv
+httpx
