@@ -434,6 +434,15 @@ def process_videos(
     if od_data and 'matrix_df' in od_data:
         od_df = od_data['matrix_df'].reset_index()
         od_df.rename(columns={'index': 'Origin \\ Dest'}, inplace=True)
+    elif enable_od:
+        if len(zones) < 2:
+            od_msg = (
+                "OD 행렬에는 최소 2개 이상의 존이 필요합니다. "
+                "'도시 공간 분석' 아코디언에서 존을 2개 이상 활성화하고 좌표를 입력해주세요."
+            )
+        else:
+            od_msg = "이번 영상에서는 활성화된 존 사이를 이동한 객체가 감지되지 않았습니다."
+        od_df = pd.DataFrame({"안내": [od_msg]})
 
     zone_df = None
     zone_data = last_analysis.get('zone_analysis', {})
@@ -753,7 +762,8 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
             # ── Traffic Analysis ─────────────────────────────────────
             with gr.Accordion("교통 분석", open=False):
                 gr.Markdown(
-                    "가상 감지선 통과 계수·유량·속도 추정·OD 행렬 등 도로 교통 분석 기능을 켜고 설정합니다.",
+                    "가상 감지선 통과 계수·유량·속도 추정 등 도로 교통 분석 기능을 켜고 설정합니다. "
+                    "(OD 행렬은 아래 '도시 공간 분석'에서 설정합니다.)",
                     elem_classes="note",
                 )
                 enable_traffic = gr.Checkbox(label="교통 분석 활성화", value=False)
@@ -791,9 +801,7 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                 with gr.Row():
                     ref_real_m = gr.Number(label="실거리 (m)", value=3.5, info="예: 차선폭 3.5 m")
                     ref_px     = gr.Number(label="픽셀 거리 (px)", value=100, info="해당 거리의 픽셀 수")
-                with gr.Row():
-                    enable_speed = gr.Checkbox(label="속도 추정 (km/h)", value=False)
-                    enable_od    = gr.Checkbox(label="OD 행렬", value=False)
+                enable_speed = gr.Checkbox(label="속도 추정 (km/h)", value=False)
 
             # ── Urban Analysis ───────────────────────────────────────
             with gr.Accordion("도시 공간 분석", open=False):
@@ -811,7 +819,7 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
 
                 gr.Markdown(
                     "**존 정의** — 직사각형 분석 영역을 정의합니다. 좌상단(x1, y1)과 우하단(x2, y2) "
-                    "픽셀 좌표를 입력하세요. 교통 분석의 OD 행렬과 공유됩니다.",
+                    "픽셀 좌표를 입력하세요. 아래 OD 행렬과 공유됩니다.",
                     elem_classes="note",
                 )
 
@@ -830,6 +838,14 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                             _z_x2 = gr.Number(value=0, label="x2 (우하단)", step=1, scale=1)
                             _z_y2 = gr.Number(value=0, label="y2 (우하단)", step=1, scale=1)
                     zone_widgets.append((_z_en, _z_nm, _z_x1, _z_y1, _z_x2, _z_y2, _z_area))
+
+                gr.Markdown(
+                    "**OD 행렬** — 위에서 활성화한 존들 사이의 이동(예: Zone A → Zone B)을 집계합니다. "
+                    "**최소 2개 이상의 존을 활성화**해야 결과가 나오며, '도시 분석 활성화'와는 무관하게 "
+                    "독립적으로 동작합니다.",
+                    elem_classes="note",
+                )
+                enable_od = gr.Checkbox(label="OD 행렬 계산", value=False)
 
             # ── Calibration ──────────────────────────────────────────
             with gr.Accordion("캘리브레이션", open=False):
@@ -1058,6 +1074,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
     )
 
     ai_insight_btn.click(
+        fn=lambda: gr.update(interactive=False, value="AI 인사이트 생성 중..."),
+        inputs=[],
+        outputs=[ai_insight_btn],
+    ).then(
         fn=run_ai_insight,
         inputs=[
             ai_insight_state, ai_provider_radio,
@@ -1068,6 +1088,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
             ai_insight_output, traffic_count_plot, traffic_speed_plot,
             zone_df_out, track_summary_df_out,
         ],
+    ).then(
+        fn=lambda: gr.update(interactive=True, value="AI 인사이트 생성"),
+        inputs=[],
+        outputs=[ai_insight_btn],
     )
 
     monitor_timer.tick(

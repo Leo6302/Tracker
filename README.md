@@ -871,6 +871,56 @@ with gr.Accordion("AI 인사이트", open=True):   # ← 새 별도 아코디언
 
 ---
 
+### 13. OD 행렬이 항상 비어 있고, 설정 방법을 화면에서 찾을 수 없음
+
+- **증상**: "OD 행렬" 체크박스를 켜고 처리해도 결과 표가 항상 비어 있거나 표시되지 않음. 무엇을 더 설정해야 하는지 화면 어디에도 안내가 없었음.
+- **원인 1 (숨겨진 의존성 버그)**: `_build_analyzers()`가 `enable_od`와 `zones`뿐 아니라 **`enable_traffic`까지 동시에 켜져 있어야** `ODMatrixBuilder`를 만들었음(`src/pipeline.py`). OD 행렬은 본질적으로 "존" 기반 기능이라 가상 감지선(교통 분석)과는 무관한데, 같은 아코디언에 체크박스가 있다는 이유만으로 강제 연동되어 있었음.
+- **원인 2 (발견 불가능한 UI 배치)**: "OD 행렬" 체크박스는 "교통 분석" 아코디언에 있었지만, 그 체크박스가 실제로 필요로 하는 "존(zone)" 설정은 완전히 다른 아코디언인 "도시 공간 분석"에 있었음. 두 설정이 서로 다른 섹션에 분리돼 있어 사용자가 둘 다 켜야 한다는 사실을 알 방법이 없었음.
+- **해결 1**: `enable_traffic` 조건 제거 — OD 행렬은 `존` + `enable_od`만으로 독립 동작하도록 수정:
+
+```python
+# src/pipeline.py — _build_analyzers()
+zones = analysis_config.get('zones', [])
+if zones and analysis_config.get('enable_od'):      # enable_traffic 조건 삭제
+    from .analysis.od_matrix import ODMatrixBuilder
+    analyzers.append(ODMatrixBuilder(zones))
+```
+
+- **해결 2**: "OD 행렬 계산" 체크박스를 "교통 분석"에서 빼내 실제 의존 대상인 "도시 공간 분석"의 존 정의 바로 아래로 이동하고, "최소 2개 이상의 존 필요"·"도시 분석 활성화와 무관하게 독립 동작" 안내문을 함께 추가.
+- **해결 3 — 빈 결과에 대한 안내**: 결과가 비어 있는 상황을 더 이상 빈 표로 침묵 처리하지 않고, 원인을 구분해 안내 메시지를 표시:
+
+```python
+# app.py — process_videos()
+elif enable_od:
+    if len(zones) < 2:
+        od_msg = "OD 행렬에는 최소 2개 이상의 존이 필요합니다. '도시 공간 분석' 아코디언에서 존을 2개 이상 활성화하고 좌표를 입력해주세요."
+    else:
+        od_msg = "이번 영상에서는 활성화된 존 사이를 이동한 객체가 감지되지 않았습니다."
+    od_df = pd.DataFrame({"안내": [od_msg]})
+```
+
+- **부가 수정 — AI 인사이트 버튼 중복 클릭 방지**: 생성 중에도 버튼이 계속 클릭 가능해 같은 요청이 중첩 발생할 수 있었음. `.click()`을 3단계 체인(`버튼 비활성화 → run_ai_insight → 버튼 재활성화`)으로 분리해 생성 중에는 버튼이 "AI 인사이트 생성 중..."으로 바뀌고 비활성화됨:
+
+```python
+ai_insight_btn.click(
+    fn=lambda: gr.update(interactive=False, value="AI 인사이트 생성 중..."),
+    outputs=[ai_insight_btn],
+).then(
+    fn=run_ai_insight, inputs=[...], outputs=[...],
+).then(
+    fn=lambda: gr.update(interactive=True, value="AI 인사이트 생성"),
+    outputs=[ai_insight_btn],
+)
+```
+`run_ai_insight()`는 실패 시에도 예외를 던지지 않고 `(gr.skip(),) * 5`를 반환하므로, 체인의 마지막 단계(재활성화)는 성공/실패 모두에서 항상 실행됨.
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - `enable_od` 체크박스를 옮겨도 `process_videos()`의 매개변수 순서나 `inputs=[...]` 리스트는 그대로 둬도 됨 — Gradio 와이어링은 컴포넌트가 어느 `with gr.Accordion(...)` 블록에 있는지가 아니라 Python 변수 자체를 참조하므로, UI상 위치 이동은 함수 시그니처/입력 리스트와 무관함.
+  - 존(zone)은 "도시 분석 활성화"(`enable_urban`) 체크박스와 무관하게 항상 정의 가능 — `enable_urban`은 `ZoneAnalyzer`/히트맵에만 영향을 주고, OD 행렬은 별도로 `zones` 리스트 자체만 본다.
+  - OD 행렬이 0이 아닌 값을 가지려면 같은 트랙이 서로 다른 두 존을 실제로 통과해야 함 — 존 1개만 활성화하면 모든 진입이 "같은 곳"이라 거리(전이)가 기록되지 않아 항상 빈 결과가 나옴(버그 아님, 정상 동작).
+- **파일**: `src/pipeline.py`, `app.py`
+
+---
+
 ## 라이선스
 
 MIT

@@ -28,7 +28,7 @@ def _build_analyzers(analysis_config, fps, fw, fh):
         analyzers.append(SpeedEstimator(scale_mpp))
 
     zones = analysis_config.get('zones', [])
-    if zones and analysis_config.get('enable_od') and analysis_config.get('enable_traffic'):
+    if zones and analysis_config.get('enable_od'):
         from .analysis.od_matrix import ODMatrixBuilder
         analyzers.append(ODMatrixBuilder(zones))
 
