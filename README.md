@@ -921,6 +921,42 @@ ai_insight_btn.click(
 
 ---
 
+### 14. 존을 2개 이상 설정해도 OD 행렬이 항상 0으로만 나옴
+
+> 항목 13으로 설정/UI 문제를 고친 뒤에도, 실제 화면에서 두 존(Zone A/B)에 모두 진입 기록이 있는데 OD 행렬 결과가 여전히 전부 0으로 나오는 문제가 보고됨 — 항목 13과는 별개의, 더 근본적인 로직 버그.
+
+- **증상**: "Zone A [5]", "Zone B [1]"처럼 두 존 모두에 진입 기록이 있음에도, OD 행렬 표는 모든 칸이 0으로 표시됨.
+- **원인**: `ODMatrixBuilder.update()`(`src/analysis/od_matrix.py`)가 트랙의 "이전 존"을 **바로 직전 프레임의 존**으로만 기억하고 있었음. 두 존 사이에 존이 아닌 일반 도로 구간이 있으면(현실에서는 거의 항상 그러함), 그 구간을 지나는 프레임마다 `_track_in_zone[tid] = None`으로 덮어써져 "Zone A에 있었다"는 기억이 사라짐. 그 결과 다음 존(Zone B)에 진입한 순간엔 `prev`가 이미 `None`이라 전이가 절대 기록되지 않음 — 두 존이 서로 붙어 있어 한 프레임 안에 바로 옮겨가는 경우에만 정상 작동하는 구조였음.
+- **해결**: 트랙이 어떤 존에도 속하지 않는 프레임은 그냥 건너뛰도록 변경 — `_track_in_zone[tid]`는 트랙이 **마지막으로 확인된 존**만 기억하고, 존이 아닌 구간을 지나도 지워지지 않음:
+
+```python
+# src/analysis/od_matrix.py — ODMatrixBuilder.update()
+def update(self, frame_idx, track_data, fps):
+    for td in track_data:
+        tid = td['track_id']
+        cx, cy = td['cx'], td['cy']
+        zone = self._get_zone(cx, cy)
+        if zone is None:
+            continue   # 존 밖 — 마지막으로 확인된 존 기억을 지우지 않음
+        prev = self._track_in_zone.get(tid)
+        if tid not in self._track_origin:
+            self._track_origin[tid] = zone
+        if prev is not None and prev != zone:
+            origin = self._track_origin.get(tid, prev)
+            if origin != zone:
+                self.matrix[(origin, zone)] = self.matrix.get((origin, zone), 0) + 1
+        self._track_in_zone[tid] = zone
+```
+
+검증: 트랙이 Zone A(연속 2프레임) → 존 없는 구간(연속 3프레임) → Zone B로 이동하는 시나리오를 시뮬레이션해, 수정 전엔 전이가 0건 기록되고 수정 후엔 `(Zone A, Zone B): 1`이 정확히 기록됨을 확인.
+
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - `origin`은 트랙이 **최초로** 진입한 존으로 고정되고 이후 다른 존에 들어가도 갱신되지 않음(의도된 동작) — 즉 A→B→C로 이동하면 (A,B)와 (A,C) 둘 다 기록되고 (B,C)는 기록되지 않음. "최초 출발지 기준" OD 행렬이라는 설계를 유지했고, 이번 수정은 그 설계 자체가 아니라 "존 사이 공백 구간에서 기억이 끊기는" 버그만 고친 것.
+  - 같은 존 안에 머무는 동안은(`prev == zone`) 매 프레임 중복 카운트되지 않음 — 이 부분은 기존에도 정상이었음.
+- **파일**: `src/analysis/od_matrix.py`
+
+---
+
 ## 라이선스
 
 MIT

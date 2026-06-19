@@ -28,17 +28,18 @@ class ODMatrixBuilder:
             tid = td['track_id']
             cx, cy = td['cx'], td['cy']
             zone = self._get_zone(cx, cy)
+            if zone is None:
+                # Between zones — keep the track's last confirmed zone intact
+                # so a gap (e.g. open road) between two zones doesn't erase it.
+                continue
             prev = self._track_in_zone.get(tid)
-            if zone != prev:
-                # Track enters a new zone
-                if zone is not None and tid not in self._track_origin:
-                    self._track_origin[tid] = zone
-                # Track moves from one zone to another
-                if zone is not None and prev is not None:
-                    origin = self._track_origin.get(tid, prev)
-                    if origin != zone:
-                        key = (origin, zone)
-                        self.matrix[key] = self.matrix.get(key, 0) + 1
+            if tid not in self._track_origin:
+                self._track_origin[tid] = zone
+            if prev is not None and prev != zone:
+                origin = self._track_origin.get(tid, prev)
+                if origin != zone:
+                    key = (origin, zone)
+                    self.matrix[key] = self.matrix.get(key, 0) + 1
             self._track_in_zone[tid] = zone
 
     def finalize(self):
