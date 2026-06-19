@@ -124,9 +124,9 @@ class SummaryImageExporter:
         for spine in ax.spines.values():
             spine.set_edgecolor('#444')
 
-        plt.tight_layout()
-        plt.savefig(path, dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
-        plt.close()
+        fig.tight_layout()
+        fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
+        plt.close(fig)
 
 
 def build_track_summary(rows, scale_mpp=None, speed_data=None):

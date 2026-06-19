@@ -1176,6 +1176,32 @@ def build_analysis_summary(last_analysis, last_result, enabled_flags) -> dict:
 
 ---
 
+### 17. "궤적 요약" 이미지에 GPU 사용률 차트가 표시됨
+
+- **증상**: 처리 완료 후 "궤적 요약" 이미지 패널에 트랙 경로 그림이 아니라 "GPU 사용률" 모니터링 차트(주황색 선 그래프)가 표시됨. 화면 자체에는 정상적인 라벨("궤적 요약")이 붙어 있어 단순 레이블 오타처럼 보이지만, 실제로는 그 라벨이 가리키는 PNG 파일의 **내용**이 통째로 바뀌어 있던 것이었음.
+- **원인**: `SummaryImageExporter.save()`(`src/visualization/exporter.py`)가 `plt.tight_layout()`/`plt.savefig(path, ...)`/`plt.close()`를 **인자 없이** 호출하고 있었음 — 이 pyplot 레벨 함수들은 자신이 만든 `fig` 객체가 아니라 matplotlib의 **전역 "현재 figure"**(`plt.gcf()`)에 대해 동작함. 그런데 `app.py`의 실시간 시스템 모니터링(`_update_monitor()` → `_make_chart()`, CPU·RAM·GPU 차트)은 `gr.Timer(value=2.0, active=True)`로 **영상 처리 중에도 2초마다 계속 실행**되며 자체적으로 `plt.subplots()`를 호출함. `process_videos()`(영상 처리, 길 때는 수 분 소요)는 별도 워커 스레드에서 동작하는 동안 모니터링 타이머는 같은 프로세스의 다른 스레드에서 계속 돌고 있어, **두 스레드가 matplotlib의 같은 전역 pyplot 상태를 동시에 건드림**. 트랙 요약 이미지를 만드는 도중(`plt.subplots()` 호출 후, `plt.savefig()` 호출 전 사이) 모니터링 타이머의 `plt.subplots()`가 끼어들면 "현재 figure"가 GPU 차트로 바뀌어버리고, 그 뒤에 호출된 `plt.savefig(path)`가 트랙 요약이 아니라 GPU 차트를 그 경로에 저장해버림. matplotlib의 pyplot 전역 상태는 스레드 안전하지 않다.
+- **해결**: 전역 상태에 의존하지 않도록, `plt.subplots()`가 반환한 **그 `fig` 객체에 직접** 호출하도록 변경:
+
+```python
+# src/visualization/exporter.py — SummaryImageExporter.save()
+fig, ax = plt.subplots(figsize=(12, 8), facecolor='#1a1a2e')
+...
+fig.tight_layout()                                                       # plt.tight_layout() 대신
+fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='#1a1a2e')     # plt.savefig(path, ...) 대신
+plt.close(fig)                                                           # plt.close() 대신 — 닫을 figure를 명시
+```
+`app.py`의 `_make_chart()`는 이미 `fig.tight_layout(pad=0.4)`처럼 객체에 직접 호출하고 있어 문제가 없었음(전역 상태를 더럽히는 쪽은 아님 — 다만 같은 전역 레지스트리에 새 figure를 계속 추가하긴 함).
+
+검증: 영상 처리 스레드를 흉내 내어 `SummaryImageExporter.save()`를 반복 호출하는 동안, 다른 스레드에서 `plt.subplots()`를 1ms 간격으로 계속 호출해 경쟁 상태를 강제로 재현 — 수정 전 코드 경로에서는 다른 figure가 저장될 위험이 있고, 수정 후에는 50회 반복 모두 정상적으로 궤적 그림만 저장됨을 확인.
+
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - matplotlib을 여러 스레드에서 동시에 쓸 때는 **인자 없는 pyplot 레벨 함수**(`plt.savefig()`, `plt.close()`, `plt.tight_layout()`, `plt.gcf()`, `plt.gca()` 등)를 절대 쓰지 말고, 항상 `fig`/`ax` 객체에 직접 호출(`fig.savefig()`, `fig.tight_layout()`, `plt.close(fig)`)할 것 — 이건 이 프로젝트뿐 아니라 matplotlib을 쓰는 모든 멀티스레드 코드에 적용되는 일반 원칙.
+  - 이 버그는 **항상** 재현되지 않음(타이밍에 의존하는 경쟁 상태) — 모니터링 타이머가 하필 그 짧은 순간에 끼어들 때만 발생하므로, 같은 영상을 다시 처리하면 정상적으로 나올 수도 있음. "가끔 발생하고 재현이 불안정한 시각적 버그"는 출력 와이어링(라벨/순서) 문제보다 이런 동시성 문제부터 의심해볼 것.
+  - 같은 문제가 다른 곳에도 있을 수 있으므로 `import matplotlib`/`from matplotlib`가 있는 모든 파일(`grep -rln "import matplotlib" src/ app.py`)을 확인했음 — 현재는 `app.py`(`_make_chart`, 이미 안전)와 `src/visualization/exporter.py`(이번에 수정) 두 곳뿐.
+- **파일**: `src/visualization/exporter.py`
+
+---
+
 ## 라이선스
 
 MIT
