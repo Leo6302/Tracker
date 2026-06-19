@@ -825,6 +825,50 @@ ai_provider_radio.change(
   - UI의 API 키 입력란은 비워두면 `.env`/환경변수로 자동 폴백하고, 값을 입력하면 그 값이 우선됨 — `generate_insight(..., api_key=(claude_api_key or None))`로 빈 문자열을 `None`으로 변환해야 폴백이 정상 동작함.
 - **파일**: `requirements.txt`, `src/analysis/ai_insight.py`, `app.py`
 
+#### 후속 수정 — 다크 테마에서 하이라이트 행 글자 안 보임 + AI 인사이트가 "트랙 요약"에 묻혀 있던 문제
+
+> 항목 12 배포 직후 실제 화면에서 두 가지 문제가 발견되어 수정.
+
+- **증상 1 — 하이라이트 행이 하얗게 칠해져 데이터가 안 보임**: "존 분석"/"트랙별 요약" 표에서 AI가 강조한 행이 흰색(또는 거의 흰색)으로 덮여 그 행의 모든 글자가 보이지 않음.
+- **증상 2 — AI 인사이트가 별도 영역이 아님**: AI 인사이트 전체 해설을 "트랙 요약" 아코디언을 열어야만 볼 수 있어, 두 기능이 한 섹션에 묻혀 있었음.
+- **원인 1**: `_highlight_dataframe`의 `_row_style`이 `background-color`만 지정하고 글자색은 지정하지 않음. 앱이 다크 테마라 기본 글자색이 밝은색인데, 하이라이트 배경도 밝은 파스텔색(`#fef3c7`, `#eff6ff`)이라 밝은 글자 + 밝은 배경 = 글자가 사실상 보이지 않게 됨.
+- **원인 2**: "AI 인사이트" UI 블록 전체(제공자 라디오, 모델/키 입력, 버튼, 출력 패널)를 `with gr.Accordion("트랙 요약", ...)` 블록 안에 넣어서 별도 아코디언으로 분리하지 않았음.
+- **해결 1**: `_row_style`이 반환하는 CSS 문자열에 어두운 글자색을 명시적으로 고정:
+
+```python
+# app.py — _highlight_dataframe 내부 _row_style
+def _row_style(row):
+    h = targets.get(row[match_column])
+    if not h:
+        return [""] * len(row)
+    bg = "#fef3c7" if h.get("importance") == "high" else "#eff6ff"
+    # 다크 테마에서도 글자가 보이도록 글자색을 명시적으로 어둡게 고정
+    return [f"background-color: {bg}; color: #1a1a1a"] * len(row)
+```
+
+- **해결 2**: "트랙 요약" 아코디언에서 AI 인사이트 관련 위젯들을 모두 빼내 `with gr.Accordion("AI 인사이트", open=True):`라는 별도 아코디언으로 분리(컴포넌트 변수명·`run_ai_insight()` 클릭 핸들러 wiring은 그대로 — 레이아웃 위치만 이동). 버튼도 `variant="secondary"` → `variant="primary"`로 바꿔 독립된 기능임을 시각적으로 강조:
+
+```python
+with gr.Accordion("트랙 요약", open=True):
+    ...
+    track_summary_df_out = gr.DataFrame(label="트랙별 요약", interactive=False)
+
+with gr.Accordion("AI 인사이트", open=True):   # ← 새 별도 아코디언
+    gr.Markdown("Claude API 또는 로컬 AI(Ollama)로 위 분석 결과를 한국어로 해설합니다. ...")
+    ai_provider_radio = gr.Radio(...)
+    with gr.Group(visible=True) as claude_group: ...
+    with gr.Group(visible=False) as ollama_group: ...
+    ai_insight_btn = gr.Button("AI 인사이트 생성", variant="primary")
+    ai_insight_output = gr.Markdown(value="", elem_classes="note")
+    ai_insight_state = gr.State(value=None)
+```
+
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - 차트 주석(`_annotate_chart`)은 이 문제와 무관함 — 배지 배경이 이미 어두운 채도색(`#b45309`, `#1d4ed8`)이고 글자색이 흰색으로 고정돼 있어 테마와 무관하게 항상 대비가 충분함. 문제는 **표** 하이라이트(밝은 파스텔 배경)에만 있었음.
+  - pandas Styler의 CSS 문자열은 세미콜론으로 여러 속성을 이어 쓸 수 있음(`"background-color: X; color: Y"`) — 한 속성만 덮어쓰면 나머지는 테마 기본값을 그대로 물려받는다는 점을 기억할 것.
+  - 아코디언 분리는 순수 레이아웃 변경이라 `run_ai_insight()`나 `.click()` 와이어링, `process_videos()`의 16개 출력 개수에는 영향 없음 — 컴포넌트가 Python 변수로 참조되는 한 어느 `with gr.Accordion(...)` 블록 안에 있는지는 무관함.
+- **파일**: `app.py`
+
 ---
 
 ## 라이선스

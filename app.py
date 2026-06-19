@@ -270,8 +270,10 @@ def _highlight_dataframe(df, highlights, match_column, category):
         h = targets.get(row[match_column])
         if not h:
             return [""] * len(row)
-        color = "#fef3c7" if h.get("importance") == "high" else "#eff6ff"
-        return [f"background-color: {color}"] * len(row)
+        bg = "#fef3c7" if h.get("importance") == "high" else "#eff6ff"
+        # 다크 테마에서도 글자가 보이도록 글자색을 명시적으로 어둡게 고정
+        # (배경만 지정하면 테마의 기본(밝은) 글자색과 겹쳐 안 보이는 문제가 있었음)
+        return [f"background-color: {bg}; color: #1a1a1a"] * len(row)
 
     return df.style.apply(_row_style, axis=1)
 
@@ -931,8 +933,9 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                 )
                 track_summary_df_out = gr.DataFrame(label="트랙별 요약", interactive=False)
 
+            with gr.Accordion("AI 인사이트", open=True):
                 gr.Markdown(
-                    "**AI 인사이트** — Claude API 또는 로컬 AI(Ollama)로 분석 결과를 한국어로 해설합니다. "
+                    "Claude API 또는 로컬 AI(Ollama)로 위 분석 결과를 한국어로 해설합니다. "
                     "주목할 데이터는 강조점으로 모아 보여주고(Claude만), 해당 차트·표에도 함께 표시됩니다.",
                     elem_classes="note",
                 )
@@ -961,7 +964,7 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                         ai_ollama_host_box = gr.Textbox(
                             value=DEFAULT_OLLAMA_HOST, label="Ollama 주소", scale=1,
                         )
-                ai_insight_btn = gr.Button("AI 인사이트 생성", variant="secondary")
+                ai_insight_btn = gr.Button("AI 인사이트 생성", variant="primary")
                 ai_insight_output = gr.Markdown(value="", elem_classes="note")
                 ai_insight_state = gr.State(value=None)
 
