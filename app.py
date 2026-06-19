@@ -482,9 +482,10 @@ def process_videos(
     last_vpath, last_result = all_results[-1]
     last_stats = last_result['stats']
 
+    total_frames = sum(r['stats']['total_frames'] for _, r in all_results)
+    total_tracks = sum(r['stats']['total_tracks'] for _, r in all_results)
+
     if is_batch:
-        total_frames = sum(r['stats']['total_frames'] for _, r in all_results)
-        total_tracks = sum(r['stats']['total_tracks'] for _, r in all_results)
         status = (
             f"완료  |  {total_videos}/{total_videos} 영상 처리됨"
             f"  |  총 프레임: {total_frames}"
@@ -515,39 +516,44 @@ def process_videos(
     ]
     last_pkg = packages[-1]
 
-    # ── 세션 저장 ─────────────────────────────────────────────────
-    session_out = None
-    if not is_batch:
-        tmp_dir = Path(tempfile.mkdtemp())
-        session_path = tmp_dir / "session.json"
-        session_cfg = SessionConfig(
-            video_hash=AnalysisSession.compute_video_hash(last_vpath),
-            yolo_model=yolo_model,
-            conf_thresh=conf_thresh,
-            seq_len=int(seq_len),
-            pred_len=int(pred_len),
-            lstm_mode=mode,
-            class_filter=list(class_filter) if class_filter else [],
-            counting_lines=counting_lines,
-            zones=zones,
-            zone_areas=zone_areas,
-            scale_mpp=scale_mpp,
-            enable_traffic=bool(enable_traffic),
-            enable_speed=bool(enable_speed),
-            enable_od=bool(enable_od),
-            enable_urban=bool(enable_urban),
-            enable_heatmap=bool(enable_heatmap),
-            heatmap_classes=list(heatmap_classes) if heatmap_classes else [],
-            export_format=export_format,
-            enable_mc_dropout=bool(enable_mc_dropout),
-            chart_format=chart_format,
-            notes=session_notes or '',
-            stats={'total_frames': last_stats['total_frames'],
-                   'total_tracks': last_stats['total_tracks'],
-                   'device': DEVICE_DESC},
-        )
-        AnalysisSession.save(session_path, session_cfg)
-        session_out = str(session_path)
+    # ── 세션 저장 (단일/배치 공통) ───────────────────────────────────
+    notes_text = session_notes or ''
+    if is_batch:
+        file_list = ', '.join(Path(vp).name for vp, _ in all_results)
+        batch_tag = f"[배치 처리 — {total_videos}개 영상: {file_list}]"
+        notes_text = f"{notes_text}\n{batch_tag}" if notes_text else batch_tag
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    session_path = tmp_dir / "session.json"
+    session_cfg = SessionConfig(
+        # 배치는 영상이 여럿이라 단일 video_hash로 대표할 수 없으므로 비워둠
+        video_hash=('' if is_batch else AnalysisSession.compute_video_hash(last_vpath)),
+        yolo_model=yolo_model,
+        conf_thresh=conf_thresh,
+        seq_len=int(seq_len),
+        pred_len=int(pred_len),
+        lstm_mode=mode,
+        class_filter=list(class_filter) if class_filter else [],
+        counting_lines=counting_lines,
+        zones=zones,
+        zone_areas=zone_areas,
+        scale_mpp=scale_mpp,
+        enable_traffic=bool(enable_traffic),
+        enable_speed=bool(enable_speed),
+        enable_od=bool(enable_od),
+        enable_urban=bool(enable_urban),
+        enable_heatmap=bool(enable_heatmap),
+        heatmap_classes=list(heatmap_classes) if heatmap_classes else [],
+        export_format=export_format,
+        enable_mc_dropout=bool(enable_mc_dropout),
+        chart_format=chart_format,
+        notes=notes_text,
+        stats={'total_frames': total_frames,
+               'total_tracks': total_tracks,
+               'device': DEVICE_DESC},
+    )
+    AnalysisSession.save(session_path, session_cfg)
+    session_out = str(session_path)
 
     # ── 배치 전용 출력 ────────────────────────────────────────────
     batch_summary_df = None

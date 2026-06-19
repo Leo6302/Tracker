@@ -6,7 +6,6 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 from pathlib import Path
 
 
@@ -107,7 +106,6 @@ class SummaryImageExporter:
         ax.set_xlim(0, self.frame_w)
         ax.set_ylim(self.frame_h, 0)
 
-        patches = []
         for tid, pts in self.histories.items():
             if len(pts) < 2:
                 continue
@@ -119,11 +117,6 @@ class SummaryImageExporter:
                 pxs = [pts[-1][0]] + [p[0] for p in self.predictions[tid]]
                 pys = [pts[-1][1]] + [p[1] for p in self.predictions[tid]]
                 ax.plot(pxs, pys, '--', color=c, linewidth=1.5, alpha=0.6)
-            patches.append(mpatches.Patch(color=c, label=f'#{tid}'))
-
-        if patches:
-            ax.legend(handles=patches, loc='upper right', fontsize=7,
-                      facecolor='#2d2d2d', labelcolor='white', framealpha=0.8)
 
         ax.set_title('Trajectory Overview  (─ history  ╌ predicted)',
                      color='white', fontsize=13)

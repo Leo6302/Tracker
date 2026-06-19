@@ -1015,6 +1015,55 @@ batch_view_btn.click(
 
 ---
 
+### 16. 궤적 요약 이미지가 객체 레이블 범례 때문에 세로로 과도하게 늘어남 + 배치 처리 시 세션 파일이 생성되지 않음
+
+- **증상 1**: `trajectory_summary.png`에서 추적 객체 수가 많을 때(수십 개) 이미지 우측에 트랙ID별 범례(`#51`, `#52`, ...)가 한 줄씩 표시되는데, matplotlib이 `bbox_inches='tight'`로 저장하면서 그 범례를 전부 담으려고 이미지 높이를 범례 길이만큼 늘려버림 — 실제 궤적 그림은 위쪽 일부일 뿐인데 그 아래로 새까만 빈 공간이 수천 픽셀 이어짐.
+- **원인 1**: `SummaryImageExporter.save()`(`src/visualization/exporter.py`)가 트랙마다 `mpatches.Patch(color=c, label=f'#{tid}')`를 만들어 `ax.legend(...)`로 전부 표시하고 있었음. 트랙 수에 비례해 범례 칸 수가 늘어나는데 폭은 그대로라 한 칸씩 아래로 쌓이며 이미지 전체가 세로로 늘어짐.
+- **해결 1**: 범례(객체별 레이블) 자체를 제거. 각 트랙은 여전히 고유 색상으로 구분되어 경로/예측선이 그려지지만, 어떤 색이 어떤 트랙 ID인지 알려주는 텍스트 목록은 더 이상 그리지 않음:
+
+```python
+# src/visualization/exporter.py — SummaryImageExporter.save()
+for tid, pts in self.histories.items():
+    if len(pts) < 2:
+        continue
+    c = self.colors.get(tid, (1, 1, 1))
+    xs, ys = zip(*pts)
+    ax.plot(xs, ys, '-', color=c, linewidth=1.5, alpha=0.85)
+    ax.plot(xs[-1], ys[-1], 'o', color=c, markersize=5)
+    if tid in self.predictions:
+        ...
+# ax.legend(...) 호출 및 mpatches.Patch 수집 로직 삭제
+```
+검증: 트랙 69개를 시뮬레이션해 저장한 결과 이미지 크기가 `1785×1183`으로 정상 범위에 머무는 것을 확인(범례가 있을 때는 트랙 수에 비례해 수천 픽셀까지 늘어났음).
+
+- **증상 2**: 배치 처리(여러 영상 동시 업로드) 후에는 "세션 파일 (JSON)" 다운로드가 항상 비어 있음(단일 영상 처리 시에는 정상 생성됨).
+- **원인 2**: `process_videos()`의 세션 저장 블록이 `if not is_batch:`로 감싸여 있어, 배치 처리 시에는 의도적으로 건너뛰고 있었음(`session_out = None`).
+- **해결 2**: 세션 저장을 배치/단일 공통 로직으로 변경. 배치는 영상이 여러 개라 `video_hash`(특정 영상 하나를 가리키는 해시) 필드는 의미가 없으므로 비워두고, 대신 처리된 파일 목록을 `notes`에 덧붙이고 `stats`에는 전체 영상의 합산 프레임·트랙 수를 기록:
+
+```python
+# app.py — process_videos()
+notes_text = session_notes or ''
+if is_batch:
+    file_list = ', '.join(Path(vp).name for vp, _ in all_results)
+    batch_tag = f"[배치 처리 — {total_videos}개 영상: {file_list}]"
+    notes_text = f"{notes_text}\n{batch_tag}" if notes_text else batch_tag
+
+session_cfg = SessionConfig(
+    video_hash=('' if is_batch else AnalysisSession.compute_video_hash(last_vpath)),
+    ...
+    notes=notes_text,
+    stats={'total_frames': total_frames, 'total_tracks': total_tracks, 'device': DEVICE_DESC},
+)
+AnalysisSession.save(session_path, session_cfg)
+session_out = str(session_path)   # is_batch 분기 없이 항상 실행
+```
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - `restore_session()`은 `video_hash`를 현재 업로드된 영상과 비교·검증하지 않고 단순히 메타데이터로만 저장함 — 배치 세션에서 비워둬도 설정 복원에는 전혀 영향 없음.
+  - `total_frames`/`total_tracks`는 기존에 `is_batch` 분기 안에서만 계산되던 것을 분기 밖으로 빼서 항상 계산하도록 바꿈 — 단일 영상 처리 시의 상태 텍스트(`status`)는 여전히 `last_stats`를 쓰므로 동작 변화 없음.
+- **파일**: `src/visualization/exporter.py`, `app.py`
+
+---
+
 ## 라이선스
 
 MIT
