@@ -609,6 +609,108 @@ def _make_speed_chart(speed_data):
   - `hovertemplate` 안의 `%{y}`, `%{x}` 는 Plotly 템플릿 변수이므로 Python f-string으로 만들면 안 됨. `<extra>...</extra>` 태그는 호버 상자의 오른쪽 파란 레이블(트레이스 이름) 을 커스텀하는 Plotly 문법.
 - **파일**: `app.py`
 
+### 11. 처리 결과가 숫자·차트뿐이라 패턴 해석은 전부 사용자가 직접 해야 함
+
+- **증상**: "교통 분석 결과"/"도시 분석 결과"/"트랙 요약" 아코디언에 차트와 표는 풍부하지만, "이 영상에서 무슨 일이 있었는지"를 문장으로 설명해주는 기능이 없어 숫자를 사람이 직접 종합해야 했음.
+- **원인**: 기존 코드에는 LLM/외부 API 호출이 전혀 없음(`requirements.txt`에 `anthropic`/`openai` 등 없음).
+- **해결**: Claude API(Anthropic SDK)를 호출해 분석 결과를 한국어로 해설하는 기능을 추가. 매 처리마다 자동으로 비용이 발생하지 않도록 **별도 버튼**("AI 인사이트 생성")으로만 호출되며, API 키는 `.env`/환경변수(`ANTHROPIC_API_KEY`)에서만 읽고 UI나 세션 파일에는 절대 저장하지 않음.
+
+**신규 파일 — `src/analysis/ai_insight.py`**: `last_analysis`/`last_result`에서 LLM에 보낼 작은 JSON 요약을 만드는 `build_analysis_summary()`와, Claude API를 호출하는 `generate_insight()`로 구성.
+
+```python
+# src/analysis/ai_insight.py
+DEFAULT_MODEL = "claude-sonnet-4-6"
+MODEL_CHOICES = ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"]
+MAX_TOKENS = 2048
+
+class AIInsightError(Exception):
+    """사용자에게 그대로 보여줄 수 있는 실패(키 누락/인증/한도/네트워크/거부)."""
+
+def generate_insight(summary, model=DEFAULT_MODEL, api_key=None):
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise AIInsightError("ANTHROPIC_API_KEY가 설정되지 않았습니다. ...")
+    import anthropic  # 지연 임포트 — 선택적 의존성으로 취급
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model, max_tokens=MAX_TOKENS,
+        system=_build_system_prompt(summary),
+        messages=[{"role": "user", "content": _build_user_message(summary)}],
+    )
+    # AuthenticationError/RateLimitError/APIStatusError/APIConnectionError →
+    # 각각 한국어 AIInsightError로 변환, stop_reason == "refusal"과 빈 응답도 처리
+    ...
+```
+
+**데이터 축소 전략** — 영상 길이에 비례해 무한정 늘어나는 원시 필드는 절대 그대로 보내지 않고, 이미 집계된 통계만 전달:
+
+| 원본 필드 | 보내는 것 | 버리는 것 |
+|---|---|---|
+| `counting_lines` | `counts`, `flow_rates_veh_hr`, `headway`, `total_crossings`(계산) | `crossings`(통과마다 1건) |
+| `speed` | `per_class`(클래스별 percentile 통계) | `track_speeds`, `track_cls`(트랙별 원시 샘플) |
+| `od_matrix` | `matrix_df` → `{origin: {dest: count}}` | `raw`(튜플 키, JSON 불가) |
+| `zone_analysis` | `zone_summaries` | `dwell_records`, `occupancy_timeseries`(초당 1건) |
+| `track_summary` | 클래스별 집계(`count`, `mean_duration_frames`, `mean_distance`, `mean_speed_kmh`) | 트랙별 원시 행 전체(수백 개일 수 있음) |
+| `congestion` | `events`(긴 순 상위 10개) + `total_events` | — |
+
+`enabled_flags`(`enable_traffic`/`enable_speed`/`enable_od`/`enable_urban`)는 `last_analysis`에서 역추론하지 않고 `process_videos()`의 기존 로컬 변수를 그대로 전달 — 토글 OFF와 "토글 ON이지만 결과 0"은 `last_analysis` 모양만으로 구분 불가능하기 때문. `_build_system_prompt()`는 `summary`에 실제로 존재하는 키만 보고 리포트 섹션(교통 흐름/혼잡 구간/속도 분포/OD 흐름/존별 특이사항)을 동적으로 구성하며, "데이터에 없는 수치를 추측·생성하지 말 것"이라는 환각 방지 지침을 반드시 포함.
+
+**`app.py` 변경 — `process_videos()` 출력 개수 15 → 16**:
+
+```python
+# process_videos() 끝, 최종 return 직전에 추가
+enabled_flags = {
+    "enable_traffic": bool(enable_traffic),
+    "enable_speed": bool(enable_speed) and scale_mpp is not None,
+    "enable_od": bool(enable_od),
+    "enable_urban": bool(enable_urban),
+}
+ai_summary = build_analysis_summary(last_analysis, last_result, enabled_flags)
+# return (..., batch_zip_path, ai_summary)   ← 맨 끝에 한 개 추가
+```
+
+출력 개수가 늘었으므로 아래 세 곳을 함께 수정해야 함:
+- 조기 반환(`"영상을 먼저 업로드해주세요"`): `(None,) * 11` → `(None,) * 12`
+- `_all_outputs` 리스트 끝에 `ai_insight_state`(새 `gr.State(value=None)`) 추가
+- `video_input.clear(fn=lambda: (None,) * 15, ...)` → `(None,) * 16`
+
+**`app.py` 변경 — UI 위젯 및 클릭 핸들러** ("트랙 요약" 아코디언 안, `track_summary_df_out` 바로 다음):
+
+```python
+with gr.Row():
+    ai_model_dropdown = gr.Dropdown(choices=MODEL_CHOICES, value=DEFAULT_MODEL,
+                                     label="Claude 모델", scale=2)
+    ai_insight_btn = gr.Button("AI 인사이트 생성", variant="secondary", scale=1)
+ai_insight_output = gr.Markdown(value="", elem_classes="note")
+ai_insight_state = gr.State(value=None)
+```
+
+```python
+def run_ai_insight(ai_summary, model):
+    if not ai_summary:
+        gr.Warning("먼저 영상을 처리해주세요. 분석 결과가 없습니다.")
+        return gr.skip()
+    try:
+        return generate_insight(ai_summary, model=model)
+    except AIInsightError as e:
+        gr.Warning(str(e))
+        return gr.skip()
+
+ai_insight_btn.click(fn=run_ai_insight, inputs=[ai_insight_state, ai_model_dropdown],
+                      outputs=[ai_insight_output])
+```
+
+`gr.Markdown`을 출력 컴포넌트로 쓴 이유는 Claude 응답의 `##` 헤더·불릿이 `gr.Textbox`에서는 `#`/`-` 글자 그대로 보이기 때문(Markdown은 실제 HTML로 렌더링). `gr.Warning` + `gr.skip()` 조합은 키 누락·인증 실패·한도 초과 등 예상 가능한 실패에서 토스트만 띄우고 이전 결과를 지우지 않기 위함 — `AIInsightError`가 아닌 예외(진짜 버그)는 잡지 않고 그대로 전파됨.
+
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - `ANTHROPIC_API_KEY`는 **반드시** `.env` 파일(`.gitignore`에 이미 포함됨) 또는 OS 환경변수로만 설정. UI 입력 필드나 `SessionConfig`(세션 JSON)에 절대 추가하지 말 것 — 세션 파일을 공유하면 키가 새어나갈 수 있음.
+  - `app.py` 상단에 `from dotenv import load_dotenv; load_dotenv()`를 다른 임포트보다 먼저 실행해야 `ANTHROPIC_API_KEY`가 `generate_insight()` 호출 시점에 채워져 있음.
+  - 출력 개수 15 → 16 변경은 **세 곳**(최종 `return` 튜플, `_all_outputs` 리스트, `video_input.clear()`의 `(None,) * N`)을 모두 같이 고쳐야 함. 하나라도 빠뜨리면 Gradio가 "Number of output components does not match" 에러를 던짐. `restore_session()`의 `(gr.skip(),) * 68`은 입력 위젯만 다루므로 영향 없음.
+  - `track_summary`는 트랙별 원시 행이 아니라 **클래스별 집계**(`_summarize_track_summary`)만 LLM에 전달됨 — 추적 객체가 수백 개여도 전송량은 클래스 수(보통 2~5개)만큼만 늘어남.
+  - `anthropic` 패키지는 `generate_insight()` 내부에서 지연 임포트(`import anthropic`)됨 — 설치가 안 돼 있어도 앱 시작 자체는 깨지지 않고, 버튼을 눌렀을 때만 에러가 남.
+  - `thinking`/`output_config.effort`는 의도적으로 사용하지 않음 — 이미 집계된 1~5KB JSON을 요약하는 단발성 작업이라 추론 단계가 품질에 도움이 되지 않고, 비용·지연만 늘어남.
+- **파일**: `requirements.txt`, `src/analysis/ai_insight.py` (신규), `app.py`
+
 ---
 
 ## 라이선스

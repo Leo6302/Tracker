@@ -6,6 +6,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import numpy as np
 import pandas as pd
 import torch
@@ -16,6 +19,10 @@ from src.pipeline import TrackingPipeline
 from src.prediction.trainer import pretrain_model
 from src.device_utils import detect_devices
 from src.analysis.session import AnalysisSession, SessionConfig
+from src.analysis.ai_insight import (
+    build_analysis_summary, generate_insight, AIInsightError,
+    DEFAULT_MODEL, MODEL_CHOICES,
+)
 
 import psutil
 from collections import deque
@@ -257,7 +264,7 @@ def process_videos(
         paths = []
 
     if not paths:
-        return (None, None, None, "영상을 먼저 업로드해주세요.") + (None,) * 11
+        return (None, None, None, "영상을 먼저 업로드해주세요.") + (None,) * 12
 
     is_batch = len(paths) > 1
     total_videos = len(paths)
@@ -462,7 +469,16 @@ def process_videos(
                         zf.write(fpath, f"{prefix}/{arcname}")
         batch_zip_path = str(zip_tmp)
 
-    # 15 outputs
+    # ── AI 인사이트용 요약 데이터 ──────────────────────────────────────
+    enabled_flags = {
+        "enable_traffic": bool(enable_traffic),
+        "enable_speed": bool(enable_speed) and scale_mpp is not None,
+        "enable_od": bool(enable_od),
+        "enable_urban": bool(enable_urban),
+    }
+    ai_summary = build_analysis_summary(last_analysis, last_result, enabled_flags)
+
+    # 16 outputs
     return (
         last_result['video'],
         last_result['csv'],
@@ -479,6 +495,7 @@ def process_videos(
         session_out,
         batch_summary_df,
         batch_zip_path,
+        ai_summary,
     )
 
 
@@ -525,6 +542,17 @@ def restore_session(session_file):
         *zone_flat,
         cfg.export_format, cfg.enable_mc_dropout, cfg.chart_format,
     )
+
+
+def run_ai_insight(ai_summary, model):
+    if not ai_summary:
+        gr.Warning("먼저 영상을 처리해주세요. 분석 결과가 없습니다.")
+        return gr.skip()
+    try:
+        return generate_insight(ai_summary, model=model)
+    except AIInsightError as e:
+        gr.Warning(str(e))
+        return gr.skip()
 
 
 # ── CSS ───────────────────────────────────────────────────────────────────
@@ -830,6 +858,22 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                 )
                 track_summary_df_out = gr.DataFrame(label="트랙별 요약")
 
+                gr.Markdown(
+                    "**AI 인사이트** — Claude가 위 분석 결과를 바탕으로 핵심 패턴, 혼잡 구간, "
+                    "권장사항 등을 한국어로 요약합니다. 별도 API 비용이 발생하므로 버튼을 눌렀을 때만 호출됩니다.",
+                    elem_classes="note",
+                )
+                with gr.Row():
+                    ai_model_dropdown = gr.Dropdown(
+                        choices=MODEL_CHOICES,
+                        value=DEFAULT_MODEL,
+                        label="Claude 모델",
+                        scale=2,
+                    )
+                    ai_insight_btn = gr.Button("AI 인사이트 생성", variant="secondary", scale=1)
+                ai_insight_output = gr.Markdown(value="", elem_classes="note")
+                ai_insight_state = gr.State(value=None)
+
             gr.HTML(
                 '<p style="font-size:14px;font-weight:700;letter-spacing:0.09em;'
                 'text-transform:uppercase;color:var(--body-text-color);'
@@ -868,7 +912,8 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
         track_summary_df_out,
         excel_download, charts_download, session_download,
         batch_summary_df_out, batch_zip_download,
-    ]  # 15 outputs
+        ai_insight_state,
+    ]  # 16 outputs
 
     run_btn.click(
         fn=process_videos,
@@ -904,9 +949,15 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
     )
 
     video_input.clear(
-        fn=lambda: (None,) * 15,
+        fn=lambda: (None,) * 16,
         inputs=[],
         outputs=_all_outputs,
+    )
+
+    ai_insight_btn.click(
+        fn=run_ai_insight,
+        inputs=[ai_insight_state, ai_model_dropdown],
+        outputs=[ai_insight_output],
     )
 
     monitor_timer.tick(
