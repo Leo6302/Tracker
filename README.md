@@ -922,7 +922,7 @@ def update(self, frame_idx, track_data, fps):
 
 - **증상**: 여러 영상을 배치로 처리하면 "영상별 처리 요약" 표와 ZIP 다운로드는 모든 영상을 포함하지만, 위쪽 결과 영역(영상·차트·표·AI 인사이트)에는 **마지막으로 처리된 영상의 결과만** 표시됨. 다른 영상의 결과를 보려면 ZIP을 받아 직접 열어보는 것 외에는 방법이 없었음.
 - **원인**: `process_videos()`가 영상 루프(`all_results`)를 다 돈 뒤 `last_vpath, last_result = all_results[-1]`로 **마지막 항목만** 꺼내 차트(`_make_traffic_count_chart` 등)·표(OD/존/트랙 요약)·AI 인사이트 요약을 빌드했음. 나머지 영상들의 분석 결과는 ZIP에 파일로만 묻히고, 화면에 다시 불러올 방법이 전혀 없었음.
-- **해결**: 영상별로 화면 표시용 산출물(차트·표·AI 인사이트 스냅샷)을 묶는 `_build_video_package()` 함수를 새로 만들어, 루프가 끝난 뒤 **모든 영상에 대해** 호출하고 그 결과 리스트(`packages`)를 새 `gr.State`(`batch_packages_state`)에 저장. 기본 화면은 여전히 마지막 영상(`packages[-1]`)을 보여주되, "배치 처리 결과" 아래에 드롭다운 + 버튼을 추가해 다른 영상으로 전환 가능.
+- **해결**: 영상별로 화면 표시용 산출물(차트·표·AI 인사이트 스냅샷)을 묶는 `_build_video_package()` 함수를 새로 만들어, 루프가 끝난 뒤 **모든 영상에 대해** 호출하고 그 결과 리스트(`packages`)를 새 `gr.State`(`batch_packages_state`)에 저장. 기본 화면은 여전히 마지막 영상(`packages[-1]`)을 보여주되, 드롭다운 + 버튼으로 다른 영상으로 전환 가능. 이 선택 UI는 **"추적 결과" 영상/궤적 이미지 바로 아래, 모든 분석 결과 아코디언보다 위**에 둔다 — 분석 결과를 한참 내려서 보기 전에 먼저 어떤 영상을 볼지 고르는 흐름이 자연스럽고, 선택을 바꿀 때마다 아래로 스크롤할 필요가 없기 때문이다.
 
 **신규 함수 — `_build_video_package()`**: 기존에 `process_videos()` 안에서 "마지막 영상"에 대해 한 번만 하던 차트/표/AI 스냅샷 빌드 로직(항목 12의 OD 빈 결과 안내 포함)을 함수로 추출한 것 — `_make_traffic_count_chart`/`_make_speed_chart`(항목 10)/`build_analysis_summary`(항목 11)는 모두 그대로 재사용:
 
@@ -1008,11 +1008,21 @@ batch_video_choices = gr.update(choices=[pkg['label'] for pkg in packages], valu
 ```
 
 ```python
-# app.py — UI ("배치 처리 결과" 섹션)
+# app.py — UI ("추적 결과" 헤더 아래, video_output/summary_img Row 바로 다음,
+# "교통 분석 결과" 등 분석 아코디언들보다 앞)
+gr.Markdown(
+    "**배치 처리 결과 선택** — 여러 영상을 배치로 처리한 경우, 아래에서 영상을 골라 "
+    "이 페이지 전체(차트·표·AI 인사이트)를 그 영상 기준으로 바꿔 볼 수 있습니다. "
+    "기본값은 마지막으로 처리된 영상입니다.",
+    elem_classes="note",
+)
 with gr.Row():
     batch_video_select = gr.Dropdown(label="결과를 확인할 영상 선택", choices=[], value=None, scale=3)
-    batch_view_btn = gr.Button("선택한 영상 결과 보기", scale=1)
+    batch_view_btn = gr.Button("선택한 영상 결과 보기", scale=1, variant="primary")
 batch_packages_state = gr.State(value=None)
+
+# "배치 처리 결과" 섹션(맨 아래, 영상별 처리 요약 표 + ZIP 다운로드)에는
+# 선택 UI를 두지 않고, 위쪽으로 이동했다는 안내만 남긴다.
 
 def view_batch_video(packages, label):
     if not packages or not label:
@@ -1042,6 +1052,7 @@ batch_view_btn.click(
   - `process_videos()`의 출력 개수가 16개 → 18개로 늘어남 — `_all_outputs`, `video_input.clear()`의 초기화 튜플, "영상 업로드 안 함" 에러 반환 튜플까지 **세 군데 모두** 같은 길이로 맞춰야 함. 길이가 안 맞으면 Gradio가 와이어링 단계에서 조용히 잘못된 컴포넌트에 값을 매핑하거나 에러를 던짐.
   - 드롭다운 라벨은 `"01. 파일명.mp4"`처럼 순번을 앞에 붙임 — 배치 파일 중 이름이 같은 영상이 섞여 있어도 라벨이 겹치지 않도록 하기 위함.
   - 단일 영상 처리 시에는 `is_batch`가 False라 드롭다운 choices가 빈 채로 남음(기존 `batch_summary_df_out`/`batch_zip_download`가 단일 처리 시 비어 있는 것과 동일한 동작) — 버그가 아니라 배치 전용 기능이라는 의미.
+  - 선택 UI(드롭다운+버튼+`batch_packages_state`)를 어디에 배치하든 `view_batch_video()`의 동작이나 `.click()` 와이어링에는 영향이 없음 — Gradio는 컴포넌트가 Python 변수로 참조되는지만 보고, 어느 `with gr.Row()`/`with gr.Column()` 블록 안에 있는지는 무관하다(항목 11의 아코디언 분리 때와 같은 원리).
 - **파일**: `app.py`
 
 ---

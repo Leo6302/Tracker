@@ -996,6 +996,19 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                 video_output = gr.Video(label="어노테이션 영상")
                 summary_img  = gr.Image(label="궤적 요약", type="filepath")
 
+            gr.Markdown(
+                "**배치 처리 결과 선택** — 여러 영상을 배치로 처리한 경우, 아래에서 영상을 골라 "
+                "이 페이지 전체(차트·표·AI 인사이트)를 그 영상 기준으로 바꿔 볼 수 있습니다. "
+                "기본값은 마지막으로 처리된 영상입니다.",
+                elem_classes="note",
+            )
+            with gr.Row():
+                batch_video_select = gr.Dropdown(
+                    label="결과를 확인할 영상 선택", choices=[], value=None, scale=3,
+                )
+                batch_view_btn = gr.Button("선택한 영상 결과 보기", scale=1, variant="primary")
+            batch_packages_state = gr.State(value=None)
+
             with gr.Accordion("교통 분석 결과", open=False):
                 gr.Markdown(
                     "감지선 통과 통계 — 클래스별 계수·유량·속도 분포를 차트로 표시합니다.",
@@ -1082,17 +1095,11 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
             )
             gr.Markdown(
                 "배치 처리 시 영상별 처리 결과 요약과 전체 결과를 ZIP으로 다운로드할 수 있습니다. "
-                "위쪽 결과 영역에는 마지막 영상이 기본으로 표시되며, 아래에서 다른 영상을 골라 다시 확인할 수 있습니다.",
+                "영상별 결과를 화면에서 바꿔보려면 위쪽 '배치 처리 결과 선택'을 사용하세요.",
                 elem_classes="note",
             )
             batch_summary_df_out = gr.DataFrame(label="영상별 처리 요약")
             batch_zip_download   = gr.File(label="전체 결과 다운로드 (ZIP)")
-            with gr.Row():
-                batch_video_select = gr.Dropdown(
-                    label="결과를 확인할 영상 선택", choices=[], value=None, scale=3,
-                )
-                batch_view_btn = gr.Button("선택한 영상 결과 보기", scale=1)
-            batch_packages_state = gr.State(value=None)
 
     # ── Flatten widget lists ──────────────────────────────────────────────
     _line_inputs_flat = [w for tup in line_widgets for w in tup]   # 4×6 = 24
