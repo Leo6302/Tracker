@@ -35,15 +35,23 @@ class SpeedEstimator:
             self._prev_frame[tid] = frame_idx
 
     def finalize(self):
-        # One representative speed per vehicle (its mean), not per frame —
-        # pooling raw per-frame samples lets idling/decelerating frames
-        # outnumber cruising frames and skews mean/std/percentiles per class.
+        # One representative speed per vehicle, not per frame — pooling raw
+        # per-frame samples lets idling/decelerating frames outnumber cruising
+        # frames and skews mean/std/percentiles per class. The representative
+        # value itself is each vehicle's 85th-percentile speed (not its mean):
+        # a vehicle slowing for a queue/light still spends many frames at low
+        # speed, which drags the mean down and understates how fast it
+        # actually travels when not impeded. Taking the high end of each
+        # vehicle's own speed samples (its "characteristic" running speed) is
+        # the standard traffic-engineering approach to representative-speed
+        # estimation (the same logic behind the V85/85th-percentile-speed
+        # metric, here applied per vehicle instead of pooled across vehicles).
         by_class = defaultdict(list)
         for tid, speeds in self.track_speeds.items():
             if not speeds:
                 continue
             cls = self.track_cls.get(tid, 'unknown')
-            by_class[cls].append(float(np.mean(speeds)))
+            by_class[cls].append(float(np.percentile(speeds, 85)))
 
         per_class = {}
         for cls, speeds in by_class.items():

@@ -180,22 +180,28 @@ class PlotlyExporter:
         track_cls = speed.get('track_cls', {})
         if not track_speeds:
             return None
-        # One sample per vehicle (its mean speed), not per frame — pooling raw
-        # per-frame samples overweights idling/decelerating tracks and turns
-        # normal cruising speeds into a wall of IQR "outlier" points.
+        # One sample per vehicle, not per frame — pooling raw per-frame samples
+        # overweights idling/decelerating tracks and turns normal cruising
+        # speeds into a wall of IQR "outlier" points. The per-vehicle sample
+        # itself is each vehicle's 85th-percentile speed rather than its mean:
+        # the mean is dragged down by queuing/deceleration frames and ends up
+        # describing "how slow this vehicle was while stuck," not how fast it
+        # travels — using the high end of its own samples (its characteristic
+        # running speed) is the standard traffic-engineering convention for a
+        # representative per-vehicle speed.
         by_class = {}
         for tid, speeds in track_speeds.items():
             if not speeds:
                 continue
             cls = track_cls.get(tid, 'unknown')
-            by_class.setdefault(cls, []).append(float(np.mean(speeds)))
+            by_class.setdefault(cls, []).append(float(np.percentile(speeds, 85)))
         fig = go.Figure()
         for cls, ys in by_class.items():
             if len(ys) < 2:
                 continue
             fig.add_trace(go.Box(name=cls, y=ys, boxmean=True, marker_color='royalblue'))
         fig.update_layout(title='Speed Distribution by Class (km/h)',
-                          yaxis_title='Mean Speed per Vehicle (km/h)', template='plotly_white')
+                          yaxis_title='85th-Percentile Speed per Vehicle (km/h)', template='plotly_white')
         return fig
 
     def _flow_timeseries(self):

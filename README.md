@@ -1507,6 +1507,50 @@ new_analysis_btn.click(
   - Gradio에서 "어느 이벤트의 `inputs`로도 안 쓰이는" 입력형 컴포넌트(Slider/Checkbox/Radio/Dropdown/Textbox/Number/CheckboxGroup 등)를 일부러 만들 때는 `interactive=True`를 빠뜨리면 자동으로 비활성화(클릭/드래그 불가, 회색 커서)되어 렌더링됨 — 단순히 데모/장식용으로 컴포넌트를 추가할 때마다 항상 의도한 `interactive` 값을 명시할 것.
 - **파일**: `app.py`, `assets/guide/*.png`(신규), `.gitignore`
 
+### 23. 속도 대표값을 "트랙별 평균"에서 "트랙별 85번째 백분위수"로 변경 — 평균도 정차/서행 구간에 끌려 내려가 실제 주행 속도를 보여주지 못함
+
+- **증상**: [18]/[19]에서 "프레임 전체 풀링 → 트랙당 평균 1개"로 고친 뒤에도, 속도 분포 차트와 엑셀 "Speed Statistics" 시트가 여전히 사용자가 필요로 하는 정보(차량이 실제로 달리는 속도)를 보여주지 못함. 원인은 대표값 자체가 여전히 **평균**이라는 점 — 교차로에서 멈췄다가 출발하는 차량은 정차/서행 프레임 수가 주행 프레임 수보다 훨씬 많으므로, 트랙 전체 프레임의 평균을 내면 "그 차량이 실제로 달릴 때의 속도"가 아니라 "그 차량이 멈춰 있던 시간 때문에 낮아진 값"이 대표값이 되어버림.
+- **원인**: `SpeedEstimator.finalize()`(`src/analysis/speed_estimator.py`)와 `PlotlyExporter._speed_box()`(`src/visualization/stats_exporter.py`) 둘 다 트랙별 대표값을 `float(np.mean(speeds))`로 계산하고 있었음. 평균은 "그 트랙이 머문 모든 속도 구간을 시간 비중대로 섞은 값"이라서, 정차·서행이 잦은 도심/교차로 영상일수록 거의 모든 차량의 대표 속도가 실제 주행 속도보다 훨씬 낮게 나옴(아래 검증 참고). 도로교통 연구 분야에서는 이런 문제를 피하기 위해 평균 대신 **분포의 상위 구간(85th percentile, 이른바 V85/85th-percentile speed 방법론)**을 차량의 특성 속도(characteristic/representative speed)로 쓰는 관행이 있음 — 이 프로젝트의 엑셀 시트도 이미 `p85` 컬럼을 노란색으로 강조해 "도로교통 분야 표준 지표"라고 표시하고 있었음([19] 참고). 다만 그 표준 지표는 *차량 간* 분포에서 85번째 백분위(=상위 15%가 더 빠름)를 뜻하는 것이고, 이번에 고친 부분은 그와 별개로 *한 차량 자신의* 프레임별 속도 샘플 중 85번째 백분위를 그 차량의 대표값으로 쓰는 것 — 같은 "평균 대신 상위 백분위" 아이디어를 한 단계 더 아래(차량 내부) 레벨에 적용한 것.
+- **해결**: 두 파일 모두 트랙별 대표값을 `np.mean(speeds)`에서 `np.percentile(speeds, 85)`로 교체:
+
+```python
+# src/analysis/speed_estimator.py — SpeedEstimator.finalize()
+by_class = defaultdict(list)
+for tid, speeds in self.track_speeds.items():
+    if not speeds:
+        continue
+    cls = self.track_cls.get(tid, 'unknown')
+    by_class[cls].append(float(np.percentile(speeds, 85)))  # 트랙 평균 대신 트랙 내 85th percentile
+```
+
+```python
+# src/visualization/stats_exporter.py — PlotlyExporter._speed_box()
+by_class = {}
+for tid, speeds in track_speeds.items():
+    if not speeds:
+        continue
+    cls = track_cls.get(tid, 'unknown')
+    by_class.setdefault(cls, []).append(float(np.percentile(speeds, 85)))  # 위와 동일
+...
+fig.update_layout(title='Speed Distribution by Class (km/h)',
+                  yaxis_title='85th-Percentile Speed per Vehicle (km/h)', template='plotly_white')
+```
+`by_class`에 모인 값(트랙별 85th-percentile 속도) 위에서 계산하는 클래스 단위 `mean`/`std`/`p15`~`p95`/`max` 집계 로직 자체는 손대지 않음 — "무엇을 한 트랙의 대표값으로 쓰는가"만 바뀌었을 뿐, 그 대표값들을 모아 클래스 통계를 내는 방식([18]/[19]에서 고친 부분)은 이미 올바르므로 그대로 둠.
+
+- **검증**: 합성 데이터(차량 50대, 각각 정차/서행 60~120프레임 + 실제 주행 10~30프레임, 정차 구간 평균 3km/h·주행 구간 평균 35km/h로 생성)로 두 방식을 비교:
+
+  | 방식 | 클래스 평균 | 클래스 표준편차 | 클래스 85th-percentile |
+  |---|---|---|---|
+  | 기존(트랙별 평균) | 8.7 km/h | 1.7 | 10.4 km/h |
+  | 변경(트랙별 85th-percentile) | 23.2 km/h | 12.5 | 33.4 km/h |
+
+  실제 차량들이 달릴 때 내는 속도(주행 구간 평균 35km/h)에 새 방식(23.2~33.4km/h)이 기존 방식(8.7~10.4km/h)보다 훨씬 근접함 — 기존 방식은 "이 클래스 차량들은 평균 8.7km/h로 달린다"는, 사실상 정차 시간 비중을 보여주는 오해의 소지가 큰 값을 내고 있었음.
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - "평균이 이상해 보인다"고 해서 항상 [18]/[19]처럼 "샘플링 단위(프레임 vs 트랙)"만 의심하면 안 됨 — 단위를 트랙으로 올바르게 잡아도, 그 트랙 내부에서 평균을 쓰면 정차·서행 시간이 길수록 똑같은 종류의 왜곡이 한 단계 아래에서 재발함. "이 숫자 하나가 무엇을 대표하는가"는 풀링 단위뿐 아니라 그 안에서 쓰는 집계 함수(mean vs percentile)까지 함께 점검할 것.
+  - `track_speeds`/`track_cls`(프레임 단위 원시 데이터)는 여전히 그대로 반환되므로, AI 인사이트(`ai_insight.py`의 `_summarize_speed()`)나 다른 신규 집계 코드를 추가할 때 또 평균을 직접 쓰지 않도록 주의.
+  - 이 변경 후 `per_class[cls]['p85']`는 "85th-percentile 속도를 가진 차량들 중에서도 다시 85번째 백분위" — 즉 두 단계의 85th-percentile이 중첩된 값이 됨(차량 내부 단계 + 클래스 간 단계). 의미가 헷갈릴 수 있으니, 향후 이 필드를 인용할 때는 "차량별 85th-percentile 속도들의 클래스 분포에서의 85th-percentile"이라고 정확히 표현할 것.
+- **파일**: `src/analysis/speed_estimator.py`, `src/visualization/stats_exporter.py`
+
 ---
 
 ## 라이선스
