@@ -1487,21 +1487,24 @@ new_analysis_btn.click(
         gr.Markdown("**직접 눌러보세요** (예시 — 실제 설정에는 적용되지 않습니다)", elem_classes="note")
         with gr.Group():
             with gr.Row():
-                gr.Checkbox(label="Line 1 활성화 (예시)", value=True, scale=1)
-                gr.Textbox(value="Line 1", label="이름 (예시)", scale=2)
+                gr.Checkbox(label="Line 1 활성화 (예시)", value=True, scale=1, interactive=True)
+                gr.Textbox(value="Line 1", label="이름 (예시)", scale=2, interactive=True)
             with gr.Row():
-                gr.Number(value=100, label="x1 (예시)", scale=1)
-                gr.Number(value=300, label="y1 (예시)", scale=1)
-                gr.Number(value=800, label="x2 (예시)", scale=1)
-                gr.Number(value=300, label="y2 (예시)", scale=1)
+                gr.Number(value=100, label="x1 (예시)", scale=1, interactive=True)
+                gr.Number(value=300, label="y1 (예시)", scale=1, interactive=True)
+                gr.Number(value=800, label="x2 (예시)", scale=1, interactive=True)
+                gr.Number(value=300, label="y2 (예시)", scale=1, interactive=True)
     ```
     이 컴포넌트들은 변수에 담아두지 않고(어차피 어떤 이벤트에도 안 쓰임) `with gr.Group():` 블록 안에 바로 생성만 함. 라벨에 "(예시)"를 붙여 실제 설정과 혼동되지 않게 함.
+
+    **추가 수정**: 처음 구현 시 `interactive=True`를 빼먹어서, 이 "예시" 위젯들이 전부 커서가 비활성화된(클릭·드래그 안 되는) 상태로 떴음. Gradio는 컴포넌트가 어떤 이벤트의 `inputs=[...]`로도 쓰이지 않으면(=아무 함수도 이 값을 읽지 않으면) `interactive`를 자동으로 `False`로 추론함 — 이 가이드의 "예시" 위젯들은 의도적으로 아무 이벤트에도 연결하지 않았으므로 정확히 이 케이스에 해당했음. 위 코드처럼 **모든** 예시 위젯(12개: 기본 설정 2개, 교통 분석 6개, 도시 공간 분석 2개, 캘리브레이션 1개, 내보내기 1개, AI 인사이트 1개)에 `interactive=True`를 명시해서 자동 추론을 막아야 함. Playwright로 `input.disabled === false`와 실제 슬라이더 값 변경(`fill()`)이 적용되는지까지 확인.
   - 트랙 요약(id=6)·세션(id=5)·배치 처리(id=8)는 입력 컨트롤보다 결과/드롭존 자체가 설명이라 이미지만 추가(예시 위젯 생략).
 - **검증**: Playwright로 (1) `#settings-panel`/`#guide-panel`의 `scrollHeight > clientHeight`이고 실제로 `scrollTop`을 끝까지 옮기면 마지막 위젯("완료" 버튼)까지 보이는지 확인, (2) 각 가이드 탭을 열어 이미지가 실제로 로드되고 "예시" 위젯이 라벨과 함께 보이는지 스크린샷으로 확인, (3) 결과 화면의 "?" 버튼(예: AI 인사이트 옆)을 눌러 해당 가이드 탭(이미지+예시 라디오 포함)으로 정확히 이동하는지 확인 — 8-3번(20번 항목)에서 고친 모달 열기/닫기 동작과 충돌 없음을 재확인.
 - **주의 (재현 시 흔히 빠지는 함정)**:
   - 이 "automatic minimum size" flexbox 규칙은 **부모가 실제로 공간이 부족할 때만** 발동함 — 콘텐츠가 패널보다 작을 때는 증상이 안 보이므로, 모달에 위젯을 추가해 콘텐츠가 `max-height`를 넘기기 전까지는 버그가 숨어 있다가 나중에 터질 수 있음. 모달/팝업 패널에 `overflow-y:auto`를 쓸 때는 처음부터 자식 `overflow`를 `visible`로 리셋해두는 게 안전함.
   - `*.png`가 `.gitignore`에 있는 프로젝트에서 의도적으로 이미지를 커밋해야 한다면, `*.png` 규칙보다 **아래 줄**에 `!경로/*.png` 예외를 추가해야 함(Git은 같은 패턴이라도 나중에 나온 규칙을 우선 적용하지만, 더 구체적인 예외는 순서와 무관하게 동작하는 디렉터리 규칙과 섞이면 헷갈리기 쉬우므로 `git status`/`git add -n`으로 실제로 추적되는지 항상 확인할 것).
   - "예시" 위젯을 실제 위젯과 똑같은 변수명으로 만들면 안 됨(이미 `yolo_model`, `enable_traffic` 등으로 다른 곳에서 쓰고 있음) — 가이드의 예시 위젯은 아예 변수에 대입하지 않거나, 대입하더라도 `run_btn.click`/`restore_session` 등 기존 `inputs=[...]`/`outputs=[...]` 목록에 절대 추가하지 말 것(추가하면 파라미터 개수가 틀어져 전체가 깨짐).
+  - Gradio에서 "어느 이벤트의 `inputs`로도 안 쓰이는" 입력형 컴포넌트(Slider/Checkbox/Radio/Dropdown/Textbox/Number/CheckboxGroup 등)를 일부러 만들 때는 `interactive=True`를 빠뜨리면 자동으로 비활성화(클릭/드래그 불가, 회색 커서)되어 렌더링됨 — 단순히 데모/장식용으로 컴포넌트를 추가할 때마다 항상 의도한 `interactive` 값을 명시할 것.
 - **파일**: `app.py`, `assets/guide/*.png`(신규), `.gitignore`
 
 ---

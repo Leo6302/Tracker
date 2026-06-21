@@ -1188,8 +1188,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction") as demo:
                             choices=["yolo11n.pt", "yolo11s.pt", "yolo11m.pt",
                                      "yolo11l.pt", "yolo11x.pt"],
                             value="yolo11n.pt", label="YOLO 모델 (예시)", info="n = 빠름 / x = 정확",
+                            interactive=True,
                         )
-                        gr.Slider(0.1, 0.9, value=0.5, step=0.05, label="감지 신뢰도 임계값 (예시)")
+                        gr.Slider(0.1, 0.9, value=0.5, step=0.05, label="감지 신뢰도 임계값 (예시)",
+                                  interactive=True)
                 with gr.Tab("교통 분석", id=1):
                     gr.Markdown(
                         "가상 감지선 통과 계수·유량·속도 추정 등 도로 교통 분석 기능입니다. "
@@ -1205,13 +1207,15 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction") as demo:
                                elem_classes="note")
                     with gr.Group():
                         with gr.Row():
-                            gr.Checkbox(label="Line 1 활성화 (예시)", value=True, scale=1)
-                            gr.Textbox(value="Line 1", label="이름 (예시)", scale=2)
+                            gr.Checkbox(label="Line 1 활성화 (예시)", value=True, scale=1,
+                                       interactive=True)
+                            gr.Textbox(value="Line 1", label="이름 (예시)", scale=2,
+                                      interactive=True)
                         with gr.Row():
-                            gr.Number(value=100, label="x1 (예시)", scale=1)
-                            gr.Number(value=300, label="y1 (예시)", scale=1)
-                            gr.Number(value=800, label="x2 (예시)", scale=1)
-                            gr.Number(value=300, label="y2 (예시)", scale=1)
+                            gr.Number(value=100, label="x1 (예시)", scale=1, interactive=True)
+                            gr.Number(value=300, label="y1 (예시)", scale=1, interactive=True)
+                            gr.Number(value=800, label="x2 (예시)", scale=1, interactive=True)
+                            gr.Number(value=300, label="y2 (예시)", scale=1, interactive=True)
                 with gr.Tab("도시 공간 분석", id=2):
                     gr.Markdown(
                         "밀도 열지도와 존별 체류시간·점유율 등 도시 공간 분석 기능입니다. "
@@ -1225,10 +1229,11 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction") as demo:
                     gr.Markdown("**직접 눌러보세요** (예시 — 실제 설정에는 적용되지 않습니다)",
                                elem_classes="note")
                     with gr.Group():
-                        gr.Checkbox(label="밀도 열지도 생성 (예시)", value=True)
+                        gr.Checkbox(label="밀도 열지도 생성 (예시)", value=True, interactive=True)
                         gr.CheckboxGroup(
                             choices=["person", "car", "bicycle", "motorcycle"],
                             value=["person"], label="열지도 대상 클래스 (예시)",
+                            interactive=True,
                         )
                 with gr.Tab("캘리브레이션", id=3):
                     gr.Markdown(
@@ -1240,7 +1245,7 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction") as demo:
                     gr.Markdown("**직접 눌러보세요** (예시 — 실제 설정에는 적용되지 않습니다)",
                                elem_classes="note")
                     gr.Radio(choices=["없음", "기준거리"], value="없음",
-                            label="캘리브레이션 모드 (예시)")
+                            label="캘리브레이션 모드 (예시)", interactive=True)
                 with gr.Tab("내보내기", id=4):
                     gr.Markdown(
                         "처리 결과를 저장할 형식을 선택합니다. CSV는 기본, Excel과 차트는 추가 분석용 "
@@ -1252,7 +1257,7 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction") as demo:
                     gr.Markdown("**직접 눌러보세요** (예시 — 실제 설정에는 적용되지 않습니다)",
                                elem_classes="note")
                     gr.Radio(choices=["CSV만", "CSV + Excel", "CSV + Excel + 차트"],
-                            value="CSV만", label="내보내기 형식 (예시)")
+                            value="CSV만", label="내보내기 형식 (예시)", interactive=True)
                 with gr.Tab("세션", id=5):
                     gr.Markdown(
                         "분석 설정을 JSON으로 저장·불러와 실험을 재현합니다. 연구자 메모도 함께 기록됩니다. "
@@ -1279,7 +1284,7 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction") as demo:
                     gr.Markdown("**직접 눌러보세요** (예시 — 실제로 전환되지 않습니다)",
                                elem_classes="note")
                     gr.Radio(choices=["Claude API", "로컬 (Ollama)"], value="Claude API",
-                            label="AI 제공자 (예시)")
+                            label="AI 제공자 (예시)", interactive=True)
                 with gr.Tab("배치 처리", id=8):
                     gr.Markdown(
                         "여러 영상을 한 번에 처리할 수 있습니다(홈 화면의 '배치 처리' 탭). 배치로 처리한 "
