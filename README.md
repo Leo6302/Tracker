@@ -1267,20 +1267,193 @@ video_input = gr.File(
 
 ### 21. UI를 홈 화면 / 결과 화면 / 세부설정·사용법가이드 모달로 재구성
 
-- **증상(배경)**: 기존 화면은 좌측 컬럼에 모든 설정(영상 업로드부터 세션까지 7개 섹션)을, 우측 컬럼에 모든 결과(차트·표·AI 인사이트·다운로드)를 한 화면에 다 펼쳐두는 "설정 폼" 구조였음. 기능은 충분했지만 처음 보는 사용자에게는 정보가 과밀해 진입장벽이 높았음.
-- **변경 내용**: 백엔드(`process_videos` 등)는 전혀 건드리지 않고, 기존 컴포넌트를 4개의 최상위 `gr.Column` 컨테이너로 재배치:
-  - `home_screen`(기본 visible): 영상 업로드 탭 + "세부설정"/"사용법 가이드" 버튼 + "처리 시작" 버튼 + 상태/모니터링만 노출.
-  - `results_screen`(처리 성공 시에만 visible): 기존 결과 섹션들 + 상단의 "새 영상 분석" 버튼. 각 섹션의 기존 설명 텍스트는 삭제하고, 섹션 헤더 옆에 동그란 "?" 버튼(`elem_classes="guide-btn"`)을 추가해 사용법 가이드의 해당 페이지로 바로 연결.
-  - `settings_modal`: 기존 설정 섹션 전체(기본 설정/교통 분석/도시 공간 분석/캘리브레이션/내보내기/세션)를 그대로 옮기고 모달 오버레이로 전환, "완료"로 닫힘.
-  - `guide_modal`: `gr.Tabs(id=0..8)`로 9개 페이지(설정 섹션과 1:1, "추적 결과"는 개념적으로 가장 가까운 "기본 설정" 페이지에 연결)를 가진 사용법 가이드 팝업. 기존 노트 텍스트를 그대로 재사용.
-  - 화면 전환: `run_btn.click(fn=process_videos, ...).then(fn=_maybe_switch_to_results, inputs=[video_output], outputs=[home_screen, results_screen])` — `process_videos`의 반환값을 건드리지 않고 `video_output`이 채워졌는지만 보고 분기. "새 영상 분석"은 기존 `video_input.clear` 리셋 패턴을 재사용해 업로드 영상·결과만 초기화하고 설정 값은 유지.
-- **구현 중 발견한 별개의 사전 버그 2가지** (이번 리디자인과 무관하게 이미 존재했으나, CSS를 만지면서 드러남):
-  1. `gr.Blocks(theme=..., css=css)`처럼 **생성자**에 `theme`/`css`를 넘기는 방식은 Gradio 6에서 deprecated이며(경고 메시지로만 알려주고 조용히 무시함), 이 앱은 `demo.launch()`가 아니라 `gr.mount_gradio_app(fastapi_app, demo, path="/")`로 마운트하기 때문에 **`css`/`theme`가 처음부터 전혀 적용되지 않고 있었음**(버튼 색상·폰트 등 커스텀 CSS 전체가 무효). `theme=`/`css=`를 `gr.mount_gradio_app(...)` 호출로 옮겨서 해결.
-  2. `#run-btn button { ... }`처럼 **Button 컴포넌트의 elem_id에 자식 `button` 셀렉터**를 쓰는 패턴은 항상 매칭되지 않았음 — Gradio는 Button의 `elem_id`/`elem_classes`를 wrapper 없이 `<button>` 태그 자체에 직접 붙이기 때문에(`<button id="run-btn">`), `#run-btn button`은 "그 버튼의 자식인 button"을 찾아 항상 빈 매치였음. `#run-btn`처럼 자식 셀렉터 없이 직접 타겟해야 함. 새로 추가한 `.guide-btn` 버튼도 같은 함정이 있어 `.guide-btn button` 대신 `.guide-btn`로 작성. (참고로 `gr.Textbox` 등은 elem_id가 wrapper div에 붙고 그 안에 `<textarea>`가 따로 있어 `#status-box textarea` 같은 자식 셀렉터가 정상 동작함 — 컴포넌트 종류에 따라 elem_id가 어디 붙는지 다름.)
-- **검증**: Playwright로 실제 브라우저를 띄워 확인 — (1) 홈 화면이 업로드+버튼만 노출되고 640px로 중앙 정렬됨, (2) "세부설정"/"사용법 가이드" 모달이 배경을 어둡게 깔고 중앙에 뜨고 "완료"/"닫기"로 정상적으로 닫힘(처음엔 모달의 `display:flex !important`가 Gradio의 `.hide{display:none}`보다 ID 선택자라 우선순위가 높아 닫힌 뒤에도 클릭을 가로채는 버그가 있었음 → `#settings-modal:not(.hide)`로 수정), (3) 합성 테스트 영상을 실제로 업로드→처리→결과 화면 자동 전환까지 end-to-end로 실행해 결과 화면 레이아웃과 "?" 버튼이 가이드의 올바른 탭(예: "추적 결과" 버튼 → "기본 설정" 탭)으로 이동하는지 확인, (4) "새 영상 분석" 클릭 시 홈으로 복귀하고 업로드 영상이 초기화되는지 확인.
+- **증상(배경)**: 기존 화면은 `with gr.Row(): [좌측 Column(scale=2): 설정 7섹션][우측 Column(scale=3): 결과 8섹션]` 단일 페이지 구조였음(영상 업로드부터 세션까지 모든 설정과, 차트·표·AI 인사이트·다운로드까지 모든 결과가 한 화면에 동시에 펼쳐짐). 기능은 충분했지만 처음 보는 사용자에게는 정보가 과밀해 진입장벽이 높았음.
+- **원인**: 설정과 결과를 분리하는 화면 전환 개념 자체가 없었고(둘 다 항상 같은 페이지에 같이 떠 있음), 각 결과 섹션 옆에 긴 설명 마크다운을 박아둬서 화면이 더 길어짐.
+- **해결**: 백엔드(`process_videos`, `restore_session`, `run_ai_insight`, `view_batch_video`, `_update_monitor`)는 **전혀 수정하지 않고**, 기존 컴포넌트를 4개의 최상위 `gr.Column`으로 재배치하고 새 네비게이션 이벤트만 추가함. 컴포넌트는 어느 컨테이너로 옮겨도 Python 변수 참조 기반 이벤트 연결이 그대로 동작하므로, 옮기는 작업 자체는 위젯 코드를 한 글자도 바꾸지 않음.
+
+**1) 최상위 골격** — 기존 `with gr.Row():` 한 개를 4개의 형제 `gr.Column`으로 교체(`app.py`, 헤더 배너 `gr.HTML` 바로 다음, 약 815번째 줄부터):
+
+```python
+with gr.Column(elem_id="home-screen") as home_screen:           # visible=True (기본)
+    ...
+with gr.Column(elem_id="results-screen", visible=False) as results_screen:
+    ...
+with gr.Column(elem_id="settings-modal", visible=False) as settings_modal:
+    with gr.Column(elem_id="settings-panel"):
+        ...
+with gr.Column(elem_id="guide-modal", visible=False) as guide_modal:
+    with gr.Column(elem_id="guide-panel"):
+        with gr.Tabs() as guide_tabs:
+            ...
+```
+
+`settings_modal`/`guide_modal`은 `home_screen`/`results_screen`의 자식이 아니라 독립된 형제 컬럼이며, CSS로 `position:fixed`를 줘서 어느 화면 위에서든 오버레이로 뜬다(아래 4번 CSS 참고). `home_screen`/`results_screen`은 항상 둘 중 하나만 `visible=True`.
+
+**2) `home_screen` 내용** — 기존 좌측 컬럼의 "영상 업로드" 섹션(`_sec("영상 업로드")` + 노트 + `gr.Tabs()`의 `video_input`/`batch_files`)은 그대로 두고, 새 버튼 Row와 기존 우측 컬럼의 실행/상태/모니터링 블록(`run_btn`, `status_box`, `monitor_summary`, "상세 모니터링" 아코디언, `monitor_timer`)을 그 아래로 옮김:
+
+```python
+        with gr.Row():
+            open_settings_btn = gr.Button("세부설정")
+            open_guide_btn = gr.Button("사용법 가이드")
+
+        run_btn = gr.Button("처리 시작", variant="primary", size="lg", elem_id="run-btn")
+        status_box = gr.Textbox(label="상태", interactive=False, lines=1, elem_id="status-box")
+        monitor_summary = gr.Textbox(label="시스템", interactive=False, lines=1, elem_id="monitor-summary")
+        with gr.Accordion("상세 모니터링", open=False):
+            with gr.Row():
+                cpu_plot = gr.Plot(label="CPU 사용률")
+                ram_plot = gr.Plot(label="RAM 사용률")
+                gpu_plot = gr.Plot(label="GPU 사용률")
+        monitor_timer = gr.Timer(value=2.0, active=True)
+```
+
+**3) `results_screen` 내용** — 기존 우측 컬럼의 결과 섹션들을 그대로 옮기되, (a) 상단에 `new_analysis_btn`을 추가하고, (b) 각 섹션의 설명 마크다운(`elem_classes="note"`)을 전부 **삭제**하고, (c) 섹션 헤더를 `gr.Row()`로 감싸 그 옆에 작은 "?" 버튼(`elem_classes="guide-btn"`)을 추가함. 아코디언이 있는 섹션은 "?" 버튼을 아코디언 **앞의 형제 Row**에 둬서 펼치지 않아도 가이드로 갈 수 있게 함. "추적 결과" 섹션 예시(나머지 6개 섹션도 동일한 패턴 — Row + "?" 버튼 + 기존 내용):
+
+```python
+    with gr.Column(elem_id="results-screen", visible=False) as results_screen:
+        new_analysis_btn = gr.Button("새 영상 분석", variant="primary")
+
+        with gr.Row():
+            gr.HTML('<p style="...">추적 결과</p>')   # 기존 헤더 HTML 그대로
+            guide_btn_tracking = gr.Button("?", elem_classes="guide-btn", scale=0, min_width=36)
+        with gr.Row():
+            video_output = gr.Video(label="어노테이션 영상")
+            summary_img  = gr.Image(label="궤적 요약", type="filepath")
+        # ... batch_video_select / batch_view_btn / batch_packages_state 그대로 ...
+
+        with gr.Row():
+            guide_btn_traffic = gr.Button("?", elem_classes="guide-btn", scale=0, min_width=36)
+        with gr.Accordion("교통 분석 결과", open=False):
+            traffic_count_plot = gr.Plot(label="통과 수 / 유량")
+            traffic_speed_plot = gr.Plot(label="속도 분포")
+            od_df_out = gr.DataFrame(label="OD 행렬")
+        # 같은 패턴: guide_btn_urban(도시 분석 결과) / guide_btn_track_summary(트랙 요약) /
+        #            guide_btn_ai(AI 인사이트) / guide_btn_export(내보내기) / guide_btn_batch(배치 처리 결과)
+```
+
+**4) `settings_modal` 내용** — 기존 좌측 컬럼의 "기본 설정"부터 "세션"까지(YOLO 모델, 교통 분석 아코디언의 4-슬롯 감지선, 도시 공간 분석 아코디언의 4-슬롯 존, 캘리브레이션, 내보내기, 세션) **위젯 코드는 한 줄도 바꾸지 않고** `with gr.Column(elem_id="settings-panel"):` 안으로 그대로 옮기고, 맨 끝에 `settings_done_btn = gr.Button("완료", variant="primary")`만 추가함.
+
+**5) `guide_modal` 내용** — `gr.Tabs() as guide_tabs` 안에 9개 `gr.Tab(label, id=N)`(설정 섹션과 1:1), 본문은 기존 노트 텍스트를 재사용. 결과 화면에서 사라진 노트(예: "교통 분석 결과"의 OD 행렬 설명)는 대응하는 탭으로 흡수:
+
+```python
+with gr.Tab("기본 설정", id=0):
+    gr.Markdown("탐지·추적·예측의 핵심 파라미터입니다. ... 이 설정은 '추적 결과'"
+                "(어노테이션 영상·궤적 요약 이미지)에 직접 반영됩니다.", elem_classes="note")
+with gr.Tab("교통 분석", id=1): ...      # id=2 도시 공간 분석, id=3 캘리브레이션,
+with gr.Tab("내보내기", id=4): ...      # id=5 세션, id=6 트랙 요약, id=7 AI 인사이트,
+with gr.Tab("배치 처리", id=8): ...     # id=8 배치 처리
+guide_close_btn = gr.Button("닫기")
+```
+| id | 탭 | 내용 출처 |
+|---|---|---|
+| 0 | 기본 설정 | 기존 "기본 설정" 노트 |
+| 1 | 교통 분석 | "교통 분석"+"감지선 정의"+"속도 추정 스케일" 노트 + (구)"교통 분석 결과"/OD 노트 |
+| 2 | 도시 공간 분석 | "도시 공간 분석"+"존 정의"+"OD 행렬" 노트 |
+| 3 | 캘리브레이션 | 기존 "캘리브레이션" 노트 |
+| 4 | 내보내기 | 기존 "내보내기" 노트(설정 쪽) |
+| 5 | 세션 | 기존 "세션" 노트 |
+| 6 | 트랙 요약 | (구)"트랙 요약" 결과 노트 |
+| 7 | AI 인사이트 | (구)"AI 인사이트" 결과 노트 |
+| 8 | 배치 처리 | 업로드 노트의 배치 부분 + (구)배치 선택/배치 결과 노트 |
+
+**6) 이벤트 와이어링 추가분** — 기존 `run_btn.click(fn=process_videos, inputs=[...], outputs=_all_outputs)`는 그대로 두고 `.then()`만 덧붙여, `process_videos`의 시그니처/반환값은 건드리지 않은 채 결과 유무로만 화면을 전환함(`video_output`이 `None`이면 "영상을 먼저 업로드해주세요." 실패 경로이므로 홈에 머무름):
+
+```python
+def _maybe_switch_to_results(video_path):
+    if video_path:
+        return gr.update(visible=False), gr.update(visible=True)
+    return gr.update(visible=True), gr.update(visible=False)
+
+run_btn.click(
+    fn=process_videos, inputs=[...기존과 동일...], outputs=_all_outputs,
+).then(
+    fn=_maybe_switch_to_results, inputs=[video_output], outputs=[home_screen, results_screen],
+)
+
+open_settings_btn.click(fn=lambda: gr.update(visible=True), inputs=[], outputs=[settings_modal])
+settings_done_btn.click(fn=lambda: gr.update(visible=False), inputs=[], outputs=[settings_modal])
+open_guide_btn.click(fn=lambda: gr.update(visible=True), inputs=[], outputs=[guide_modal])
+guide_close_btn.click(fn=lambda: gr.update(visible=False), inputs=[], outputs=[guide_modal])
+
+def _open_guide_at(n):
+    return lambda: (gr.update(visible=True), gr.update(selected=n))
+
+guide_btn_tracking.click(fn=_open_guide_at(0), inputs=[], outputs=[guide_modal, guide_tabs])
+guide_btn_traffic.click(fn=_open_guide_at(1), inputs=[], outputs=[guide_modal, guide_tabs])
+guide_btn_urban.click(fn=_open_guide_at(2), inputs=[], outputs=[guide_modal, guide_tabs])
+guide_btn_track_summary.click(fn=_open_guide_at(6), inputs=[], outputs=[guide_modal, guide_tabs])
+guide_btn_ai.click(fn=_open_guide_at(7), inputs=[], outputs=[guide_modal, guide_tabs])
+guide_btn_export.click(fn=_open_guide_at(4), inputs=[], outputs=[guide_modal, guide_tabs])
+guide_btn_batch.click(fn=_open_guide_at(8), inputs=[], outputs=[guide_modal, guide_tabs])
+
+_RESET_ALL_OUTPUTS = (None,) * 17 + (gr.update(choices=[], value=None),)   # 기존 video_input.clear와 동일한 리셋 튜플
+
+new_analysis_btn.click(
+    fn=lambda: (None, None) + _RESET_ALL_OUTPUTS + (gr.update(visible=True), gr.update(visible=False)),
+    inputs=[],
+    outputs=[video_input, batch_files] + _all_outputs + [home_screen, results_screen],
+)
+```
+`yolo_model`/감지선/존 등 설정 위젯은 이 출력 목록에 전혀 들어가지 않으므로, "새 영상 분석"을 눌러도 세부설정 값은 그대로 유지됨. 기존 `video_input.clear(...)`, `session_load.upload(...)`, `ai_insight_btn.click()` 체인, `batch_view_btn.click(...)`, `monitor_timer.tick(...)`, `ai_provider_radio.change(...)`는 **한 글자도 바꾸지 않음**.
+
+**7) CSS 추가분** — 기존 `css = """ ... """` 문자열(`app.py` 상단)에 다음을 추가:
+
+```css
+/* 모달 오버레이 — :not(.hide)인 이유는 아래 8-2번 버그 참고 */
+#settings-modal:not(.hide), #guide-modal:not(.hide) {
+    position: fixed !important; inset: 0 !important; z-index: 1000 !important;
+    background: rgba(0,0,0,0.5) !important;
+    display: flex !important; align-items: center !important; justify-content: center !important;
+    padding: 24px !important;
+}
+#settings-panel, #guide-panel {
+    background: var(--background-fill-primary) !important;
+    border-radius: 6px !important; max-width: 880px !important; width: 100% !important;
+    max-height: 86vh !important; overflow-y: auto !important;
+    padding: 24px 28px !important; box-shadow: 0 8px 32px rgba(0,0,0,0.35) !important;
+}
+#home-screen { max-width: 640px !important; margin: 40px auto !important; }
+#home-screen #status-box textarea,
+#home-screen #monitor-summary textarea { font-size: 11px !important; opacity: 0.7 !important; }
+.guide-btn {
+    min-width: 28px !important; width: 28px !important; height: 28px !important; padding: 0 !important;
+    border-radius: 50% !important; font-size: 12px !important; font-weight: 700 !important;
+    background: transparent !important; border: 1px solid var(--border-color-primary) !important;
+    color: var(--body-text-color-subdued) !important;
+}
+.guide-btn:hover { background: var(--background-fill-secondary) !important; }
+```
+
+**8) 구현 중 발견한 별개의 사전 버그 2가지** (이번 리디자인과 무관하게 이미 존재했으나, CSS를 새로 추가하면서 비로소 드러남 — 둘 다 같은 커밋에서 함께 수정):
+
+  1. **`css`/`theme`가 처음부터 전혀 적용되지 않고 있었음.** 기존 코드는 `with gr.Blocks(title=..., theme=gr.themes.Monochrome(), css=css) as demo:`처럼 **생성자**에 `theme`/`css`를 넘기고 있었는데, 이는 Gradio 6에서 deprecated된 방식이고(`"The parameters have been moved from the Blocks constructor to the launch() method in Gradio 6.0: theme, css"` 경고가 콘솔에 뜸) 이 앱은 `demo.launch()`를 호출하지 않고 `gr.mount_gradio_app(fastapi_app, demo, path="/")`로 FastAPI에 마운트하는 구조라 `theme`/`css`가 완전히 무시되고 있었음(버튼 색상·폰트 등 커스텀 CSS 전체가 무효 — 원래 있던 `#run-btn` 네이비 색상도 안 먹고 Gradio 기본 검정 버튼으로 보였음). **해결**:
+     ```python
+     # 변경 전
+     with gr.Blocks(title="Object Tracking + Trajectory Prediction",
+                    theme=gr.themes.Monochrome(), css=css) as demo:
+     ...
+     gr.mount_gradio_app(fastapi_app, demo, path="/")
+
+     # 변경 후
+     with gr.Blocks(title="Object Tracking + Trajectory Prediction") as demo:
+     ...
+     gr.mount_gradio_app(fastapi_app, demo, path="/",
+                         theme=gr.themes.Monochrome(), css=css)
+     ```
+  2. **`#run-btn button { ... }` 셀렉터가 한 번도 매칭된 적이 없었음.** Gradio는 `gr.Button`의 `elem_id`/`elem_classes`를 wrapper 없이 `<button>` 태그 자체에 직접 붙임(`<button id="run-btn">...`) — 즉 "`#run-btn`의 자식인 `button`"을 찾는 `#run-btn button` 디센던트 셀렉터는 항상 빈 매치였음(Button 컴포넌트만의 특성; `gr.Textbox` 등은 `elem_id`가 별도 wrapper div에 붙고 그 안에 실제 `<textarea>`가 있어 `#status-box textarea` 같은 자식 셀렉터가 정상 동작함). **해결**: `#run-btn button`→`#run-btn`, `#run-btn button:hover`→`#run-btn:hover`, `#run-btn button:active`→`#run-btn:active`로 자식 셀렉터 제거. 이번에 새로 추가한 `.guide-btn` 버튼도 처음엔 같은 패턴(`.guide-btn button`)으로 썼다가 똑같이 매칭되지 않아 `.guide-btn`/`.guide-btn:hover`로 수정.
+  3. **모달을 닫아도 클릭이 막히는 버그.** 1번을 고쳐서 CSS가 실제로 로드되기 시작하자, `#settings-modal { display: flex !important; ... }`(ID 셀렉터, specificity 100)가 Gradio가 `visible=False`일 때 붙이는 `.hide { display: none !important; }`(클래스 셀렉터, specificity 10)보다 우선순위가 높아서, 모달을 닫아도(`visible=False`) 여전히 `position:fixed`+`display:flex`로 화면 전체를 덮어 그 뒤의 버튼 클릭을 가로채는 문제가 있었음. **해결**: 셀렉터를 `#settings-modal:not(.hide)`로 바꿔, `.hide` 클래스가 붙어 있으면 이 규칙 자체가 적용되지 않게 함(7번 CSS 코드에 이미 반영됨).
+
+- **검증**: Playwright(`pip install playwright` + `playwright install chromium`)로 실제 헤드리스 브라우저를 띄워 확인.
+  - `getComputedStyle`로 `#home-screen`의 `max-width`가 `640px`로, `#run-btn`의 배경색이 `#1d3a56`(rgb(29,58,86))로 적용되는지 직접 확인(8-1, 8-2번 버그 수정 전후 비교).
+  - 홈 → "세부설정" 클릭 → 모달이 배경을 어둡게 깔고 중앙에 뜨는지 스크린샷으로 확인 → "완료" → 모달이 닫히고 그 뒤 다른 버튼(예: "사용법 가이드")이 정상적으로 클릭되는지 확인(8-3번 버그는 클릭이 가로채여 `TimeoutError`로 재현됐고, 수정 후 통과).
+  - "사용법 가이드" → 탭("교통 분석" 등) 클릭 시 본문이 해당 탭 내용으로 바뀌는지 확인.
+  - OpenCV로 만든 합성 mp4(이동하는 사각형)를 실제로 `#home-screen input[type=file]`에 업로드 → "처리 시작" 클릭 → `#results-screen:not(.hide)`가 나타날 때까지 대기(실 파이프라인 끝까지 실행) → 결과 화면에 7개 "?" 버튼이 정확한 위치에 있는지, 첫 "?"(추적 결과) 클릭 시 가이드가 "기본 설정" 탭(id=0)으로 열리는지 확인.
+  - "새 영상 분석" 클릭 → 홈 화면으로 복귀하고 업로드 파일이 비워지는지 확인.
 - **주의 (재현 시 흔히 빠지는 함정)**:
   - `gr.mount_gradio_app`으로 마운트하는 앱에서 `css`/`theme`가 전혀 안 먹는 것처럼 보인다면, 콘솔의 "parameters have been moved from the Blocks constructor to the launch() method" 경고를 놓치지 말 것 — `demo.launch()`를 안 쓰는 구조라면 `mount_gradio_app(..., theme=..., css=...)`로 넘겨야 함.
-  - `visible=False`로 시작하는 최상위 컴포넌트(이번의 4개 컨테이너)는 처음 페이지 로드 시 DOM에 아예 마운트되지 않다가, 그 컴포넌트를 대상으로 한 첫 `gr.update`가 도착해야 비로소 마운트됨 — `document.querySelector`로 즉시 존재 여부를 확인하려는 디버깅 스크립트는 최소 한 번 상호작용이 일어난 뒤에 검사해야 함.
+  - ID 셀렉터로 `position:fixed`/`display` 등을 강제로 켜는 오버레이 CSS를 작성할 때는, Gradio의 `visible=False` → `.hide` 클래스(클래스 셀렉터)와 specificity 싸움이 날 수 있으므로 항상 `:not(.hide)`를 붙일 것.
+  - `gr.Button`은 `elem_id`/`elem_classes`가 `<button>` 자체에 붙으므로 자식 셀렉터(`#id button`, `.cls button`)를 쓰면 안 되고, `gr.Textbox`/`gr.File` 등 입력 컴포넌트는 wrapper div에 붙으므로 자식 셀렉터(`#id textarea` 등)가 필요함 — 컴포넌트 종류별로 다름.
+  - `visible=False`로 시작하는 최상위 컴포넌트(이번의 4개 컨테이너)는 페이지 첫 로드 시 DOM에 아예 마운트되지 않다가, 그 컴포넌트를 대상으로 한 첫 `gr.update`가 도착해야 비로소 마운트됨 — `document.querySelector`로 즉시 존재 여부를 확인하는 디버깅 스크립트는 최소 한 번 상호작용이 일어난 뒤에 검사해야 함(아니면 "컴포넌트가 안 만들어졌다"는 잘못된 결론을 내리기 쉬움).
 - **파일**: `app.py`
 
 ---
