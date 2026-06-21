@@ -378,11 +378,7 @@ def process_videos(
     if batch_paths:
         paths = batch_paths
     elif video_input is not None:
-        vp = video_input
-        if isinstance(vp, dict):
-            vdata = vp.get("video", {})
-            vp = vdata.get("path") if isinstance(vdata, dict) else str(vdata)
-        paths = [vp] if vp else []
+        paths = [str(video_input)]
     else:
         paths = []
 
@@ -781,7 +777,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
             )
             with gr.Tabs():
                 with gr.Tab("단일 영상"):
-                    video_input = gr.Video(label="영상 파일  (MP4 / AVI / MOV)")
+                    video_input = gr.File(
+                        file_types=[".mp4", ".avi", ".mov", ".mkv"],
+                        label="영상 파일  (MP4 / AVI / MOV)",
+                    )
                 with gr.Tab("배치 처리"):
                     batch_files = gr.File(
                         file_count="multiple",
