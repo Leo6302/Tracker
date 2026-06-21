@@ -1265,6 +1265,24 @@ video_input = gr.File(
   - "video not playable"은 Gradio/브라우저의 **프리뷰 전용** 오류이며 파일 자체의 손상이나 백엔드 처리 가능 여부와는 무관함 — 영상 관련 "간헐적" 오류를 볼 때 파일 손상을 의심하기보다, 먼저 어떤 컴포넌트(`gr.Video` vs `gr.File`)로 입력받는지부터 확인할 것.
 - **파일**: `app.py`
 
+### 21. UI를 홈 화면 / 결과 화면 / 세부설정·사용법가이드 모달로 재구성
+
+- **증상(배경)**: 기존 화면은 좌측 컬럼에 모든 설정(영상 업로드부터 세션까지 7개 섹션)을, 우측 컬럼에 모든 결과(차트·표·AI 인사이트·다운로드)를 한 화면에 다 펼쳐두는 "설정 폼" 구조였음. 기능은 충분했지만 처음 보는 사용자에게는 정보가 과밀해 진입장벽이 높았음.
+- **변경 내용**: 백엔드(`process_videos` 등)는 전혀 건드리지 않고, 기존 컴포넌트를 4개의 최상위 `gr.Column` 컨테이너로 재배치:
+  - `home_screen`(기본 visible): 영상 업로드 탭 + "세부설정"/"사용법 가이드" 버튼 + "처리 시작" 버튼 + 상태/모니터링만 노출.
+  - `results_screen`(처리 성공 시에만 visible): 기존 결과 섹션들 + 상단의 "새 영상 분석" 버튼. 각 섹션의 기존 설명 텍스트는 삭제하고, 섹션 헤더 옆에 동그란 "?" 버튼(`elem_classes="guide-btn"`)을 추가해 사용법 가이드의 해당 페이지로 바로 연결.
+  - `settings_modal`: 기존 설정 섹션 전체(기본 설정/교통 분석/도시 공간 분석/캘리브레이션/내보내기/세션)를 그대로 옮기고 모달 오버레이로 전환, "완료"로 닫힘.
+  - `guide_modal`: `gr.Tabs(id=0..8)`로 9개 페이지(설정 섹션과 1:1, "추적 결과"는 개념적으로 가장 가까운 "기본 설정" 페이지에 연결)를 가진 사용법 가이드 팝업. 기존 노트 텍스트를 그대로 재사용.
+  - 화면 전환: `run_btn.click(fn=process_videos, ...).then(fn=_maybe_switch_to_results, inputs=[video_output], outputs=[home_screen, results_screen])` — `process_videos`의 반환값을 건드리지 않고 `video_output`이 채워졌는지만 보고 분기. "새 영상 분석"은 기존 `video_input.clear` 리셋 패턴을 재사용해 업로드 영상·결과만 초기화하고 설정 값은 유지.
+- **구현 중 발견한 별개의 사전 버그 2가지** (이번 리디자인과 무관하게 이미 존재했으나, CSS를 만지면서 드러남):
+  1. `gr.Blocks(theme=..., css=css)`처럼 **생성자**에 `theme`/`css`를 넘기는 방식은 Gradio 6에서 deprecated이며(경고 메시지로만 알려주고 조용히 무시함), 이 앱은 `demo.launch()`가 아니라 `gr.mount_gradio_app(fastapi_app, demo, path="/")`로 마운트하기 때문에 **`css`/`theme`가 처음부터 전혀 적용되지 않고 있었음**(버튼 색상·폰트 등 커스텀 CSS 전체가 무효). `theme=`/`css=`를 `gr.mount_gradio_app(...)` 호출로 옮겨서 해결.
+  2. `#run-btn button { ... }`처럼 **Button 컴포넌트의 elem_id에 자식 `button` 셀렉터**를 쓰는 패턴은 항상 매칭되지 않았음 — Gradio는 Button의 `elem_id`/`elem_classes`를 wrapper 없이 `<button>` 태그 자체에 직접 붙이기 때문에(`<button id="run-btn">`), `#run-btn button`은 "그 버튼의 자식인 button"을 찾아 항상 빈 매치였음. `#run-btn`처럼 자식 셀렉터 없이 직접 타겟해야 함. 새로 추가한 `.guide-btn` 버튼도 같은 함정이 있어 `.guide-btn button` 대신 `.guide-btn`로 작성. (참고로 `gr.Textbox` 등은 elem_id가 wrapper div에 붙고 그 안에 `<textarea>`가 따로 있어 `#status-box textarea` 같은 자식 셀렉터가 정상 동작함 — 컴포넌트 종류에 따라 elem_id가 어디 붙는지 다름.)
+- **검증**: Playwright로 실제 브라우저를 띄워 확인 — (1) 홈 화면이 업로드+버튼만 노출되고 640px로 중앙 정렬됨, (2) "세부설정"/"사용법 가이드" 모달이 배경을 어둡게 깔고 중앙에 뜨고 "완료"/"닫기"로 정상적으로 닫힘(처음엔 모달의 `display:flex !important`가 Gradio의 `.hide{display:none}`보다 ID 선택자라 우선순위가 높아 닫힌 뒤에도 클릭을 가로채는 버그가 있었음 → `#settings-modal:not(.hide)`로 수정), (3) 합성 테스트 영상을 실제로 업로드→처리→결과 화면 자동 전환까지 end-to-end로 실행해 결과 화면 레이아웃과 "?" 버튼이 가이드의 올바른 탭(예: "추적 결과" 버튼 → "기본 설정" 탭)으로 이동하는지 확인, (4) "새 영상 분석" 클릭 시 홈으로 복귀하고 업로드 영상이 초기화되는지 확인.
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - `gr.mount_gradio_app`으로 마운트하는 앱에서 `css`/`theme`가 전혀 안 먹는 것처럼 보인다면, 콘솔의 "parameters have been moved from the Blocks constructor to the launch() method" 경고를 놓치지 말 것 — `demo.launch()`를 안 쓰는 구조라면 `mount_gradio_app(..., theme=..., css=...)`로 넘겨야 함.
+  - `visible=False`로 시작하는 최상위 컴포넌트(이번의 4개 컨테이너)는 처음 페이지 로드 시 DOM에 아예 마운트되지 않다가, 그 컴포넌트를 대상으로 한 첫 `gr.update`가 도착해야 비로소 마운트됨 — `document.querySelector`로 즉시 존재 여부를 확인하려는 디버깅 스크립트는 최소 한 번 상호작용이 일어난 뒤에 검사해야 함.
+- **파일**: `app.py`
+
 ---
 
 ## 라이선스

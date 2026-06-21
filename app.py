@@ -715,7 +715,7 @@ html.dark, html.dark body { background: #161616 !important; }
     padding-right: 28px !important;
     box-sizing: border-box !important;
 }
-#run-btn button {
+#run-btn {
     background: #1d3a56 !important;
     color: #fff !important;
     font-weight: 600 !important;
@@ -725,12 +725,62 @@ html.dark, html.dark body { background: #161616 !important; }
     border-radius: 2px !important;
     padding: 13px 0 !important;
 }
-#run-btn button:hover { background: #274f78 !important; }
-#run-btn button:active { background: #162c42 !important; }
+#run-btn:hover { background: #274f78 !important; }
+#run-btn:active { background: #162c42 !important; }
 #status-box textarea {
     font-size: 12px !important;
     font-family: 'Menlo', 'Consolas', 'Courier New', monospace !important;
 }
+
+/* Modal overlays (settings / guide) — :not(.hide) so Gradio's own
+   `.hide { display: none }` (added when visible=False) isn't fought by our
+   `display: flex` override; an ID selector would otherwise outrank it. */
+#settings-modal:not(.hide), #guide-modal:not(.hide) {
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 1000 !important;
+    background: rgba(0,0,0,0.5) !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 24px !important;
+}
+#settings-panel, #guide-panel {
+    background: var(--background-fill-primary) !important;
+    border-radius: 6px !important;
+    max-width: 880px !important;
+    width: 100% !important;
+    max-height: 86vh !important;
+    overflow-y: auto !important;
+    padding: 24px 28px !important;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.35) !important;
+}
+
+/* Home screen — minimal, centered */
+#home-screen {
+    max-width: 640px !important;
+    margin: 40px auto !important;
+}
+#home-screen #status-box textarea,
+#home-screen #monitor-summary textarea {
+    font-size: 11px !important;
+    opacity: 0.7 !important;
+}
+
+/* Small circular "?" guide buttons beside results section headers */
+.guide-btn {
+    min-width: 28px !important;
+    width: 28px !important;
+    height: 28px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+    background: transparent !important;
+    border: 1px solid var(--border-color-primary) !important;
+    color: var(--body-text-color-subdued) !important;
+}
+.guide-btn:hover { background: var(--background-fill-secondary) !important; }
 """
 
 
@@ -749,8 +799,7 @@ def _sec(text):
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────
 
-with gr.Blocks(title="Object Tracking + Trajectory Prediction",
-               theme=gr.themes.Monochrome(), css=css) as demo:
+with gr.Blocks(title="Object Tracking + Trajectory Prediction") as demo:
 
     gr.HTML(
         '<div style="text-align:center;border-bottom:1px solid var(--border-color-primary);'
@@ -766,28 +815,163 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
         '</div>'
     )
 
-    with gr.Row():
-        # ── Left panel ──────────────────────────────────────────────────
-        with gr.Column(scale=2, min_width=360):
+    with gr.Column(elem_id="home-screen") as home_screen:
+        _sec("영상 업로드")
+        gr.Markdown(
+            "처리할 동영상 파일을 선택합니다. 단일 영상 또는 배치 처리(여러 파일)를 선택할 수 있습니다.",
+            elem_classes="note",
+        )
+        with gr.Tabs():
+            with gr.Tab("단일 영상"):
+                video_input = gr.File(
+                    file_types=[".mp4", ".avi", ".mov", ".mkv"],
+                    label="영상 파일  (MP4 / AVI / MOV)",
+                )
+            with gr.Tab("배치 처리"):
+                batch_files = gr.File(
+                    file_count="multiple",
+                    file_types=[".mp4", ".avi", ".mov", ".mkv"],
+                    label="영상 파일 목록  (여러 파일 선택 가능)",
+                )
 
-            _sec("영상 업로드")
-            gr.Markdown(
-                "처리할 동영상 파일을 선택합니다. 단일 영상 또는 배치 처리(여러 파일)를 선택할 수 있습니다.",
-                elem_classes="note",
+        with gr.Row():
+            open_settings_btn = gr.Button("세부설정")
+            open_guide_btn = gr.Button("사용법 가이드")
+
+        run_btn = gr.Button("처리 시작", variant="primary",
+                            size="lg", elem_id="run-btn")
+        status_box = gr.Textbox(label="상태", interactive=False,
+                                lines=1, elem_id="status-box")
+        monitor_summary = gr.Textbox(
+            label="시스템", interactive=False, lines=1,
+            elem_id="monitor-summary",
+        )
+        with gr.Accordion("상세 모니터링", open=False):
+            with gr.Row():
+                cpu_plot = gr.Plot(label="CPU 사용률")
+                ram_plot = gr.Plot(label="RAM 사용률")
+                gpu_plot = gr.Plot(label="GPU 사용률")
+        monitor_timer = gr.Timer(value=2.0, active=True)
+
+    with gr.Column(elem_id="results-screen", visible=False) as results_screen:
+        new_analysis_btn = gr.Button("새 영상 분석", variant="primary")
+
+        with gr.Row():
+            gr.HTML(
+                '<p style="font-size:14px;font-weight:700;letter-spacing:0.09em;'
+                'text-transform:uppercase;color:var(--body-text-color);'
+                'padding:0 0 0 10px;border-left:3px solid var(--border-color-accent);'
+                'margin:16px 0 8px 0;line-height:1.5;display:block;">추적 결과</p>'
             )
-            with gr.Tabs():
-                with gr.Tab("단일 영상"):
-                    video_input = gr.File(
-                        file_types=[".mp4", ".avi", ".mov", ".mkv"],
-                        label="영상 파일  (MP4 / AVI / MOV)",
-                    )
-                with gr.Tab("배치 처리"):
-                    batch_files = gr.File(
-                        file_count="multiple",
-                        file_types=[".mp4", ".avi", ".mov", ".mkv"],
-                        label="영상 파일 목록  (여러 파일 선택 가능)",
-                    )
+            guide_btn_tracking = gr.Button("?", elem_classes="guide-btn", scale=0, min_width=36)
+        with gr.Row():
+            video_output = gr.Video(label="어노테이션 영상")
+            summary_img  = gr.Image(label="궤적 요약", type="filepath")
 
+        with gr.Row():
+            batch_video_select = gr.Dropdown(
+                label="결과를 확인할 영상 선택", choices=[], value=None, scale=3,
+            )
+            batch_view_btn = gr.Button("선택한 영상 결과 보기", scale=1, variant="primary")
+        batch_packages_state = gr.State(value=None)
+
+        with gr.Row():
+            guide_btn_traffic = gr.Button("?", elem_classes="guide-btn", scale=0, min_width=36)
+        with gr.Accordion("교통 분석 결과", open=False):
+            traffic_count_plot = gr.Plot(label="통과 수 / 유량")
+            traffic_speed_plot = gr.Plot(label="속도 분포")
+            od_df_out = gr.DataFrame(label="OD 행렬")
+
+        with gr.Row():
+            guide_btn_urban = gr.Button("?", elem_classes="guide-btn", scale=0, min_width=36)
+        with gr.Accordion("도시 분석 결과", open=False):
+            heatmap_img_out = gr.Image(label="밀도 열지도", type="filepath")
+            zone_df_out = gr.DataFrame(label="존 분석  (체류시간 · 밀도)", interactive=False)
+
+        with gr.Row():
+            guide_btn_track_summary = gr.Button("?", elem_classes="guide-btn", scale=0, min_width=36)
+        with gr.Accordion("트랙 요약", open=True):
+            track_summary_df_out = gr.DataFrame(label="트랙별 요약", interactive=False)
+
+        with gr.Row():
+            guide_btn_ai = gr.Button("?", elem_classes="guide-btn", scale=0, min_width=36)
+        with gr.Accordion("AI 인사이트", open=True):
+            ai_provider_radio = gr.Radio(
+                choices=["Claude API", "로컬 (Ollama)"], value="Claude API", label="AI 제공자",
+            )
+            with gr.Group(visible=True) as claude_group:
+                ai_model_dropdown = gr.Dropdown(
+                    choices=MODEL_CHOICES, value=DEFAULT_MODEL, label="Claude 모델",
+                )
+                ai_api_key_box = gr.Textbox(
+                    label="Anthropic API 키 (선택)", type="password",
+                    placeholder="sk-ant-... (비워두면 .env의 ANTHROPIC_API_KEY 사용)",
+                )
+            with gr.Group(visible=False) as ollama_group:
+                gr.Markdown(
+                    "[Ollama 설치](https://ollama.com/download) 후 터미널에서 "
+                    f"`ollama pull {DEFAULT_OLLAMA_MODEL}` 실행 (한국어 지원, 약 4.8GB). "
+                    "API 키 불필요, 인터넷 연결도 불필요합니다.",
+                    elem_classes="note",
+                )
+                with gr.Row():
+                    ai_ollama_model_box = gr.Textbox(
+                        value=DEFAULT_OLLAMA_MODEL, label="Ollama 모델", scale=2,
+                    )
+                    ai_ollama_host_box = gr.Textbox(
+                        value=DEFAULT_OLLAMA_HOST, label="Ollama 주소", scale=1,
+                    )
+            ai_insight_btn = gr.Button("AI 인사이트 생성", variant="primary")
+            ai_insight_output = gr.Markdown(value="", elem_classes="note")
+            ai_insight_state = gr.State(value=None)
+
+            ai_provider_radio.change(
+                fn=lambda p: (
+                    gr.update(visible=(p == "Claude API")),
+                    gr.update(visible=(p == "로컬 (Ollama)")),
+                ),
+                inputs=[ai_provider_radio],
+                outputs=[claude_group, ollama_group],
+            )
+
+        with gr.Row():
+            gr.HTML(
+                '<p style="font-size:14px;font-weight:700;letter-spacing:0.09em;'
+                'text-transform:uppercase;color:var(--body-text-color);'
+                'padding:0 0 0 10px;border-left:3px solid var(--border-color-accent);'
+                'margin:24px 0 8px 0;line-height:1.5;display:block;">내보내기</p>'
+            )
+            guide_btn_export = gr.Button("?", elem_classes="guide-btn", scale=0, min_width=36)
+        with gr.Row():
+            csv_download   = gr.File(label="예측 데이터  (CSV)")
+            excel_download = gr.File(label="연구 보고서  (Excel)")
+        with gr.Row():
+            charts_download  = gr.File(label="분석 차트  (HTML / SVG)")
+            session_download = gr.File(label="세션 파일  (JSON)")
+
+        with gr.Row():
+            gr.HTML(
+                '<p style="font-size:14px;font-weight:700;letter-spacing:0.09em;'
+                'text-transform:uppercase;color:var(--body-text-color);'
+                'padding:0 0 0 10px;border-left:3px solid var(--border-color-accent);'
+                'margin:24px 0 8px 0;line-height:1.5;display:block;">배치 처리 결과</p>'
+            )
+            guide_btn_batch = gr.Button("?", elem_classes="guide-btn", scale=0, min_width=36)
+        batch_summary_df_out = gr.DataFrame(label="영상별 처리 요약")
+        batch_zip_download   = gr.File(label="전체 결과 다운로드 (ZIP)")
+
+        gr.HTML(
+            '<p style="font-size:11px;color:var(--body-text-color-subdued);'
+            'border-top:1px solid var(--border-color-primary);'
+            'margin-top:14px;padding-top:10px;line-height:1.9;">'
+            '실선 = 과거 이동 경로 &nbsp;|&nbsp; 점선 = 예측 궤적 &nbsp;|&nbsp;'
+            ' 청색선 = 감지선 &nbsp;|&nbsp; 오렌지 폴리곤 = 분석 존 &nbsp;|&nbsp;'
+            ' 각 색상은 고유 Track ID를 나타냅니다.'
+            '</p>'
+        )
+
+    with gr.Column(elem_id="settings-modal", visible=False) as settings_modal:
+        with gr.Column(elem_id="settings-panel"):
             _sec("기본 설정")
             gr.Markdown(
                 "탐지·추적·예측의 핵심 파라미터입니다. YOLO 모델이 클수록 정확하지만 느려지고, "
@@ -964,141 +1148,77 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
                     file_types=[".json"],
                 )
 
-        # ── Right panel ──────────────────────────────────────────────────
-        with gr.Column(scale=3):
-            run_btn = gr.Button("처리 시작", variant="primary",
-                                size="lg", elem_id="run-btn")
-            status_box = gr.Textbox(label="상태", interactive=False,
-                                    lines=1, elem_id="status-box")
-            monitor_summary = gr.Textbox(
-                label="시스템", interactive=False, lines=1,
-                elem_id="monitor-summary",
-            )
-            with gr.Accordion("상세 모니터링", open=False):
-                with gr.Row():
-                    cpu_plot = gr.Plot(label="CPU 사용률")
-                    ram_plot = gr.Plot(label="RAM 사용률")
-                    gpu_plot = gr.Plot(label="GPU 사용률")
-            monitor_timer = gr.Timer(value=2.0, active=True)
+            settings_done_btn = gr.Button("완료", variant="primary")
 
-            gr.HTML(
-                '<p style="font-size:14px;font-weight:700;letter-spacing:0.09em;'
-                'text-transform:uppercase;color:var(--body-text-color);'
-                'padding:0 0 0 10px;border-left:3px solid var(--border-color-accent);'
-                'margin:16px 0 8px 0;line-height:1.5;display:block;">추적 결과</p>'
-            )
-            gr.Markdown(
-                "처리 완료된 어노테이션 영상과 전체 궤적 요약 이미지입니다. 영상이 브라우저에서 바로 재생됩니다.",
-                elem_classes="note",
-            )
-            with gr.Row():
-                video_output = gr.Video(label="어노테이션 영상")
-                summary_img  = gr.Image(label="궤적 요약", type="filepath")
-
-            gr.Markdown(
-                "**배치 처리 결과 선택** — 여러 영상을 배치로 처리한 경우, 아래에서 영상을 골라 "
-                "이 페이지 전체(차트·표·AI 인사이트)를 그 영상 기준으로 바꿔 볼 수 있습니다. "
-                "기본값은 마지막으로 처리된 영상입니다.",
-                elem_classes="note",
-            )
-            with gr.Row():
-                batch_video_select = gr.Dropdown(
-                    label="결과를 확인할 영상 선택", choices=[], value=None, scale=3,
-                )
-                batch_view_btn = gr.Button("선택한 영상 결과 보기", scale=1, variant="primary")
-            batch_packages_state = gr.State(value=None)
-
-            with gr.Accordion("교통 분석 결과", open=False):
-                gr.Markdown(
-                    "감지선 통과 통계 — 클래스별 계수·유량·속도 분포를 차트로 표시합니다.",
-                    elem_classes="note",
-                )
-                traffic_count_plot = gr.Plot(label="통과 수 / 유량")
-                traffic_speed_plot = gr.Plot(label="속도 분포")
-                gr.Markdown("Origin-Destination 행렬", elem_classes="note")
-                od_df_out = gr.DataFrame(label="OD 행렬")
-
-            with gr.Accordion("도시 분석 결과", open=False):
-                heatmap_img_out = gr.Image(label="밀도 열지도", type="filepath")
-                zone_df_out = gr.DataFrame(label="존 분석  (체류시간 · 밀도)", interactive=False)
-
-            with gr.Accordion("트랙 요약", open=True):
-                gr.Markdown(
-                    "추적된 개별 객체(트랙)별 이동 경로 요약입니다. 진입·퇴장 프레임, 이동 거리, 속도를 확인할 수 있습니다.",
-                    elem_classes="note",
-                )
-                track_summary_df_out = gr.DataFrame(label="트랙별 요약", interactive=False)
-
-            with gr.Accordion("AI 인사이트", open=True):
-                gr.Markdown(
-                    "Claude API 또는 로컬 AI(Ollama)로 위 분석 결과를 한국어로 해설합니다. "
-                    "주목할 데이터는 강조점으로 모아 보여주고(Claude만), 해당 차트·표에도 함께 표시됩니다.",
-                    elem_classes="note",
-                )
-                ai_provider_radio = gr.Radio(
-                    choices=["Claude API", "로컬 (Ollama)"], value="Claude API", label="AI 제공자",
-                )
-                with gr.Group(visible=True) as claude_group:
-                    ai_model_dropdown = gr.Dropdown(
-                        choices=MODEL_CHOICES, value=DEFAULT_MODEL, label="Claude 모델",
-                    )
-                    ai_api_key_box = gr.Textbox(
-                        label="Anthropic API 키 (선택)", type="password",
-                        placeholder="sk-ant-... (비워두면 .env의 ANTHROPIC_API_KEY 사용)",
-                    )
-                with gr.Group(visible=False) as ollama_group:
+    with gr.Column(elem_id="guide-modal", visible=False) as guide_modal:
+        with gr.Column(elem_id="guide-panel"):
+            with gr.Tabs() as guide_tabs:
+                with gr.Tab("기본 설정", id=0):
                     gr.Markdown(
-                        "[Ollama 설치](https://ollama.com/download) 후 터미널에서 "
-                        f"`ollama pull {DEFAULT_OLLAMA_MODEL}` 실행 (한국어 지원, 약 4.8GB). "
-                        "API 키 불필요, 인터넷 연결도 불필요합니다.",
+                        "탐지·추적·예측의 핵심 파라미터입니다. YOLO 모델이 클수록 정확하지만 느려지고, "
+                        "시퀀스/예측 길이는 LSTM이 보는 과거 구간과 예측할 미래 구간의 길이(프레임)입니다. "
+                        "이 설정은 '추적 결과'(어노테이션 영상·궤적 요약 이미지)에 직접 반영됩니다.",
                         elem_classes="note",
                     )
-                    with gr.Row():
-                        ai_ollama_model_box = gr.Textbox(
-                            value=DEFAULT_OLLAMA_MODEL, label="Ollama 모델", scale=2,
-                        )
-                        ai_ollama_host_box = gr.Textbox(
-                            value=DEFAULT_OLLAMA_HOST, label="Ollama 주소", scale=1,
-                        )
-                ai_insight_btn = gr.Button("AI 인사이트 생성", variant="primary")
-                ai_insight_output = gr.Markdown(value="", elem_classes="note")
-                ai_insight_state = gr.State(value=None)
-
-                ai_provider_radio.change(
-                    fn=lambda p: (
-                        gr.update(visible=(p == "Claude API")),
-                        gr.update(visible=(p == "로컬 (Ollama)")),
-                    ),
-                    inputs=[ai_provider_radio],
-                    outputs=[claude_group, ollama_group],
-                )
-
-            gr.HTML(
-                '<p style="font-size:14px;font-weight:700;letter-spacing:0.09em;'
-                'text-transform:uppercase;color:var(--body-text-color);'
-                'padding:0 0 0 10px;border-left:3px solid var(--border-color-accent);'
-                'margin:24px 0 8px 0;line-height:1.5;display:block;">내보내기</p>'
-            )
-            with gr.Row():
-                csv_download   = gr.File(label="예측 데이터  (CSV)")
-                excel_download = gr.File(label="연구 보고서  (Excel)")
-            with gr.Row():
-                charts_download  = gr.File(label="분석 차트  (HTML / SVG)")
-                session_download = gr.File(label="세션 파일  (JSON)")
-
-            gr.HTML(
-                '<p style="font-size:14px;font-weight:700;letter-spacing:0.09em;'
-                'text-transform:uppercase;color:var(--body-text-color);'
-                'padding:0 0 0 10px;border-left:3px solid var(--border-color-accent);'
-                'margin:24px 0 8px 0;line-height:1.5;display:block;">배치 처리 결과</p>'
-            )
-            gr.Markdown(
-                "배치 처리 시 영상별 처리 결과 요약과 전체 결과를 ZIP으로 다운로드할 수 있습니다. "
-                "영상별 결과를 화면에서 바꿔보려면 위쪽 '배치 처리 결과 선택'을 사용하세요.",
-                elem_classes="note",
-            )
-            batch_summary_df_out = gr.DataFrame(label="영상별 처리 요약")
-            batch_zip_download   = gr.File(label="전체 결과 다운로드 (ZIP)")
+                with gr.Tab("교통 분석", id=1):
+                    gr.Markdown(
+                        "가상 감지선 통과 계수·유량·속도 추정 등 도로 교통 분석 기능입니다. "
+                        "**감지선 정의** — 시작점(x1, y1)에서 끝점(x2, y2)으로 이어지는 가상 선을 정의하면 "
+                        "통과 차량을 자동으로 계수합니다. **속도 추정 스케일** — 실거리와 픽셀 거리를 입력하면 "
+                        "km/h로 변환합니다. 결과 화면에서는 클래스별 통과 수·유량·속도 분포 차트와 함께 "
+                        "Origin-Destination 행렬도 함께 표시됩니다(OD 행렬 자체는 '도시 공간 분석'에서 설정).",
+                        elem_classes="note",
+                    )
+                with gr.Tab("도시 공간 분석", id=2):
+                    gr.Markdown(
+                        "밀도 열지도와 존별 체류시간·점유율 등 도시 공간 분석 기능입니다. "
+                        "**존 정의** — 직사각형 분석 영역을 정의합니다. 좌상단(x1, y1)과 우하단(x2, y2) "
+                        "픽셀 좌표를 입력하세요. **OD 행렬** — 활성화한 존들 사이의 이동(예: Zone A → Zone B)을 "
+                        "집계합니다. 최소 2개 이상의 존을 활성화해야 결과가 나오며, '도시 분석 활성화'와는 "
+                        "무관하게 독립적으로 동작합니다.",
+                        elem_classes="note",
+                    )
+                with gr.Tab("캘리브레이션", id=3):
+                    gr.Markdown(
+                        "픽셀→실세계 거리 변환 방식을 선택합니다. '기준거리' 선택 시 교통 분석에 입력한 "
+                        "실거리·픽셀거리로 m/px를 자동 계산합니다.",
+                        elem_classes="note",
+                    )
+                with gr.Tab("내보내기", id=4):
+                    gr.Markdown(
+                        "처리 결과를 저장할 형식을 선택합니다. CSV는 기본, Excel과 차트는 추가 분석용 "
+                        "보고서를 생성합니다. 결과 화면 하단의 '내보내기' 섹션에서 각 파일을 내려받을 수 "
+                        "있습니다.",
+                        elem_classes="note",
+                    )
+                with gr.Tab("세션", id=5):
+                    gr.Markdown(
+                        "분석 설정을 JSON으로 저장·불러와 실험을 재현합니다. 연구자 메모도 함께 기록됩니다.",
+                        elem_classes="note",
+                    )
+                with gr.Tab("트랙 요약", id=6):
+                    gr.Markdown(
+                        "추적된 개별 객체(트랙)별 이동 경로 요약입니다. 진입·퇴장 프레임, 이동 거리, "
+                        "속도를 확인할 수 있습니다.",
+                        elem_classes="note",
+                    )
+                with gr.Tab("AI 인사이트", id=7):
+                    gr.Markdown(
+                        "Claude API 또는 로컬 AI(Ollama)로 분석 결과를 한국어로 해설합니다. "
+                        "주목할 데이터는 강조점으로 모아 보여주고(Claude만), 해당 차트·표에도 함께 "
+                        "표시됩니다.",
+                        elem_classes="note",
+                    )
+                with gr.Tab("배치 처리", id=8):
+                    gr.Markdown(
+                        "여러 영상을 한 번에 처리할 수 있습니다(홈 화면의 '배치 처리' 탭). 배치로 처리한 "
+                        "경우, 결과 화면 상단에서 영상을 골라 이 페이지 전체(차트·표·AI 인사이트)를 그 "
+                        "영상 기준으로 바꿔 볼 수 있습니다. 기본값은 마지막으로 처리된 영상입니다. 영상별 "
+                        "처리 결과 요약과 전체 결과 ZIP 다운로드는 결과 화면의 '배치 처리 결과' 섹션에서 "
+                        "확인할 수 있습니다.",
+                        elem_classes="note",
+                    )
+            guide_close_btn = gr.Button("닫기")
 
     # ── Flatten widget lists ──────────────────────────────────────────────
     _line_inputs_flat = [w for tup in line_widgets for w in tup]   # 4×6 = 24
@@ -1116,6 +1236,11 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
         batch_packages_state, batch_video_select,
     ]  # 18 outputs
 
+    def _maybe_switch_to_results(video_path):
+        if video_path:
+            return gr.update(visible=False), gr.update(visible=True)
+        return gr.update(visible=True), gr.update(visible=False)
+
     run_btn.click(
         fn=process_videos,
         inputs=[
@@ -1132,6 +1257,10 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
             export_format, enable_mc_dropout, chart_format,
         ],
         outputs=_all_outputs,
+    ).then(
+        fn=_maybe_switch_to_results,
+        inputs=[video_output],
+        outputs=[home_screen, results_screen],
     )
 
     session_load.upload(
@@ -1194,14 +1323,44 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction",
         outputs=[monitor_summary, cpu_plot, ram_plot, gpu_plot],
     )
 
-    gr.HTML(
-        '<p style="font-size:11px;color:var(--body-text-color-subdued);'
-        'border-top:1px solid var(--border-color-primary);'
-        'margin-top:14px;padding-top:10px;line-height:1.9;">'
-        '실선 = 과거 이동 경로 &nbsp;|&nbsp; 점선 = 예측 궤적 &nbsp;|&nbsp;'
-        ' 청색선 = 감지선 &nbsp;|&nbsp; 오렌지 폴리곤 = 분석 존 &nbsp;|&nbsp;'
-        ' 각 색상은 고유 Track ID를 나타냅니다.'
-        '</p>'
+    # ── Settings modal open/close ───────────────────────────────────────
+    open_settings_btn.click(
+        fn=lambda: gr.update(visible=True),
+        inputs=[], outputs=[settings_modal],
+    )
+    settings_done_btn.click(
+        fn=lambda: gr.update(visible=False),
+        inputs=[], outputs=[settings_modal],
+    )
+
+    # ── Guide modal open/close + per-section deep links ─────────────────
+    open_guide_btn.click(
+        fn=lambda: gr.update(visible=True),
+        inputs=[], outputs=[guide_modal],
+    )
+    guide_close_btn.click(
+        fn=lambda: gr.update(visible=False),
+        inputs=[], outputs=[guide_modal],
+    )
+
+    def _open_guide_at(n):
+        return lambda: (gr.update(visible=True), gr.update(selected=n))
+
+    guide_btn_tracking.click(fn=_open_guide_at(0), inputs=[], outputs=[guide_modal, guide_tabs])
+    guide_btn_traffic.click(fn=_open_guide_at(1), inputs=[], outputs=[guide_modal, guide_tabs])
+    guide_btn_urban.click(fn=_open_guide_at(2), inputs=[], outputs=[guide_modal, guide_tabs])
+    guide_btn_track_summary.click(fn=_open_guide_at(6), inputs=[], outputs=[guide_modal, guide_tabs])
+    guide_btn_ai.click(fn=_open_guide_at(7), inputs=[], outputs=[guide_modal, guide_tabs])
+    guide_btn_export.click(fn=_open_guide_at(4), inputs=[], outputs=[guide_modal, guide_tabs])
+    guide_btn_batch.click(fn=_open_guide_at(8), inputs=[], outputs=[guide_modal, guide_tabs])
+
+    # ── New analysis: reset uploaded video/results, keep settings, go home ──
+    _RESET_ALL_OUTPUTS = (None,) * 17 + (gr.update(choices=[], value=None),)
+
+    new_analysis_btn.click(
+        fn=lambda: (None, None) + _RESET_ALL_OUTPUTS + (gr.update(visible=True), gr.update(visible=False)),
+        inputs=[],
+        outputs=[video_input, batch_files] + _all_outputs + [home_screen, results_screen],
     )
 
 if __name__ == "__main__":
@@ -1218,7 +1377,8 @@ if __name__ == "__main__":
 
     fastapi_app = FastAPI()
     fastapi_app.add_middleware(_SABHeadersMiddleware)
-    gr.mount_gradio_app(fastapi_app, demo, path="/")
+    gr.mount_gradio_app(fastapi_app, demo, path="/",
+                        theme=gr.themes.Monochrome(), css=css)
 
     print("[서버] http://127.0.0.1:7860")
     uvicorn.run(fastapi_app, host="127.0.0.1", port=7860)
