@@ -180,17 +180,22 @@ class PlotlyExporter:
         track_cls = speed.get('track_cls', {})
         if not track_speeds:
             return None
+        # One sample per vehicle (its mean speed), not per frame — pooling raw
+        # per-frame samples overweights idling/decelerating tracks and turns
+        # normal cruising speeds into a wall of IQR "outlier" points.
         by_class = {}
         for tid, speeds in track_speeds.items():
+            if not speeds:
+                continue
             cls = track_cls.get(tid, 'unknown')
-            by_class.setdefault(cls, []).extend(speeds)
+            by_class.setdefault(cls, []).append(float(np.mean(speeds)))
         fig = go.Figure()
         for cls, ys in by_class.items():
             if len(ys) < 2:
                 continue
             fig.add_trace(go.Box(name=cls, y=ys, boxmean=True, marker_color='royalblue'))
         fig.update_layout(title='Speed Distribution by Class (km/h)',
-                          yaxis_title='Speed (km/h)', template='plotly_white')
+                          yaxis_title='Mean Speed per Vehicle (km/h)', template='plotly_white')
         return fig
 
     def _flow_timeseries(self):

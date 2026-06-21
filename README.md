@@ -1200,6 +1200,30 @@ plt.close(fig)                                                           # plt.c
   - 같은 문제가 다른 곳에도 있을 수 있으므로 `import matplotlib`/`from matplotlib`가 있는 모든 파일(`grep -rln "import matplotlib" src/ app.py`)을 확인했음 — 현재는 `app.py`(`_make_chart`, 이미 안전)와 `src/visualization/exporter.py`(이번에 수정) 두 곳뿐.
 - **파일**: `src/visualization/exporter.py`
 
+### 18. 속도 분포(박스플롯) 차트가 이상치로 뒤덮여 깨진 것처럼 보임
+
+- **증상**: `research_charts.html`의 "Speed Distribution by Class" 박스플롯에서 클래스별 박스가 0~8km/h 부근에 짜부러져 있고, 그 위로 점들이 빽빽하게 겹쳐 찍혀 막대/기둥처럼 보임. 정상적인 주행속도(15~60km/h)가 전부 박스 위쪽 "이상치"로 그려져 분포가 깨진 것처럼 보였음.
+- **원인**: `PlotlyExporter._speed_box()`(`src/visualization/stats_exporter.py`)가 트랙(차량)별 대표 속도가 아니라, 트랙이 살아있는 동안의 **모든 프레임의 순간속도**(EMA smoothed)를 그대로 풀링해서 박스플롯에 넘기고 있었음. 차량 한 대가 정차·서행하는 프레임 수는 수백 개인 반면 실제로 빠르게 주행하는 프레임 수는 적기 때문에, 프레임 단위로 합치면 "체류 시간"이 분포 모양을 지배하게 됨. 실제 데이터에서 car 클래스는 프레임 샘플 16,185개 중 1,469개(9.1%)가 IQR 기준 이상치로 분류되어 박스 위에 점이 두껍게 쌓였고, 평균(6.17km/h)보다 표준편차(7.58km/h)가 더 큰 극단적 우측 편포를 보였음. `exporter.py`의 Track Summary 시트는 이미 트랙당 `mean_speed_kmh` 하나를 집계해 쓰고 있어, 이 차트만 다른 집계 단위(프레임)를 쓰고 있었던 셈.
+- **검증**: HTML에 내장된 Plotly JSON에서 실제 트레이스 데이터를 추출해 클래스별 표본 수·분위수·이상치 비율을 계산(car 16,185개/9.1% 이상치, truck 2,132개/7.0% 등). 합성 데이터(트랙당 정차 프레임 다수 + 주행 프레임 소수)로 수정 후 `_speed_box()`를 호출해, y 배열 길이가 프레임 수가 아니라 트랙 수와 같아짐(트랙 50개 → 표본 50개)을 확인.
+- **해결**: 프레임을 그대로 풀링하지 않고, 트랙별 평균 속도 1개를 그 트랙의 대표값으로 쓴 뒤 클래스별로 모음:
+
+```python
+# src/visualization/stats_exporter.py — PlotlyExporter._speed_box()
+by_class = {}
+for tid, speeds in track_speeds.items():
+    if not speeds:
+        continue
+    cls = track_cls.get(tid, 'unknown')
+    by_class.setdefault(cls, []).append(float(np.mean(speeds)))  # 프레임 전체 대신 트랙당 평균 1개
+...
+fig.update_layout(title='Speed Distribution by Class (km/h)',
+                  yaxis_title='Mean Speed per Vehicle (km/h)', template='plotly_white')
+```
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - 같은 "프레임 전체 풀링" 패턴이 `src/analysis/speed_estimator.py`의 `finalize()`(Excel "Speed Statistics" 시트의 mean/std/percentile)에도 동일하게 존재함 — 이번 수정은 차트(`_speed_box`)만 대상으로 했고 통계 시트는 그대로 두었음. 필요하면 같은 방식(트랙당 1개 값)으로 맞춰야 일관성이 생김.
+  - 박스플롯의 "이상치"는 통계적으로 드문 사건이 아니라, 샘플링 단위(프레임 vs 차량)를 잘못 잡았을 때도 대량으로 발생할 수 있음 — 이상치 비율이 비정상적으로 높다면(수% 이상) 우선 "표본 하나가 무엇을 대표하는가"부터 의심할 것.
+- **파일**: `src/visualization/stats_exporter.py`
+
 ---
 
 ## 라이선스
