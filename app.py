@@ -44,6 +44,7 @@ except Exception:
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 PRETRAINED_PATH = Path(__file__).parent / "models" / "lstm_pretrained.pt"
+GUIDE_IMG_DIR = Path(__file__).parent / "assets" / "guide"
 
 with open(CONFIG_PATH) as f:
     BASE_CONFIG: dict = yaml.safe_load(f)
@@ -755,6 +756,18 @@ html.dark, html.dark body { background: #161616 !important; }
     padding: 24px 28px !important;
     box-shadow: 0 8px 32px rgba(0,0,0,0.35) !important;
 }
+/* Gradio gives many block-level children (note Markdown, Group, collapsed
+   Accordion) their own `overflow: auto` by default. Once the panel itself
+   is a scrollable flex column, that per-child overflow triggers flexbox's
+   "automatic minimum size" rule (a flex item with overflow != visible gets
+   an effective min-height of 0), so those children get crushed toward 0px
+   instead of the panel growing to its full content height and scrolling.
+   Resetting descendants back to overflow:visible removes that trigger —
+   nothing inside these panels needs its own internal scrollbar, only the
+   panel itself does. */
+#settings-panel *, #guide-panel * {
+    overflow: visible !important;
+}
 
 /* Home screen — minimal, centered */
 #home-screen {
@@ -1152,72 +1165,131 @@ with gr.Blocks(title="Object Tracking + Trajectory Prediction") as demo:
 
     with gr.Column(elem_id="guide-modal", visible=False) as guide_modal:
         with gr.Column(elem_id="guide-panel"):
+            _GUIDE_IMG_KW = dict(show_label=False, container=True, interactive=False,
+                                 buttons=["fullscreen"])
+
+            def _guide_img(filename):
+                return gr.Image(value=str(GUIDE_IMG_DIR / filename), **_GUIDE_IMG_KW)
+
             with gr.Tabs() as guide_tabs:
                 with gr.Tab("기본 설정", id=0):
                     gr.Markdown(
                         "탐지·추적·예측의 핵심 파라미터입니다. YOLO 모델이 클수록 정확하지만 느려지고, "
                         "시퀀스/예측 길이는 LSTM이 보는 과거 구간과 예측할 미래 구간의 길이(프레임)입니다. "
-                        "이 설정은 '추적 결과'(어노테이션 영상·궤적 요약 이미지)에 직접 반영됩니다.",
+                        "이 설정은 '추적 결과'(어노테이션 영상·궤적 요약 이미지)에 직접 반영됩니다. "
+                        "아래는 실제 '세부설정' 화면의 모습입니다.",
                         elem_classes="note",
                     )
+                    _guide_img("00_basic_settings.png")
+                    gr.Markdown("**직접 눌러보세요** (예시 — 실제 설정에는 적용되지 않습니다)",
+                               elem_classes="note")
+                    with gr.Group():
+                        gr.Dropdown(
+                            choices=["yolo11n.pt", "yolo11s.pt", "yolo11m.pt",
+                                     "yolo11l.pt", "yolo11x.pt"],
+                            value="yolo11n.pt", label="YOLO 모델 (예시)", info="n = 빠름 / x = 정확",
+                        )
+                        gr.Slider(0.1, 0.9, value=0.5, step=0.05, label="감지 신뢰도 임계값 (예시)")
                 with gr.Tab("교통 분석", id=1):
                     gr.Markdown(
                         "가상 감지선 통과 계수·유량·속도 추정 등 도로 교통 분석 기능입니다. "
                         "**감지선 정의** — 시작점(x1, y1)에서 끝점(x2, y2)으로 이어지는 가상 선을 정의하면 "
                         "통과 차량을 자동으로 계수합니다. **속도 추정 스케일** — 실거리와 픽셀 거리를 입력하면 "
                         "km/h로 변환합니다. 결과 화면에서는 클래스별 통과 수·유량·속도 분포 차트와 함께 "
-                        "Origin-Destination 행렬도 함께 표시됩니다(OD 행렬 자체는 '도시 공간 분석'에서 설정).",
+                        "Origin-Destination 행렬도 함께 표시됩니다(OD 행렬 자체는 '도시 공간 분석'에서 설정). "
+                        "아래는 실제 '교통 분석' 설정 화면입니다 — Line 1처럼 활성화·이름·좌표를 입력합니다.",
                         elem_classes="note",
                     )
+                    _guide_img("01_traffic.png")
+                    gr.Markdown("**직접 눌러보세요** (예시 — 실제 설정에는 적용되지 않습니다)",
+                               elem_classes="note")
+                    with gr.Group():
+                        with gr.Row():
+                            gr.Checkbox(label="Line 1 활성화 (예시)", value=True, scale=1)
+                            gr.Textbox(value="Line 1", label="이름 (예시)", scale=2)
+                        with gr.Row():
+                            gr.Number(value=100, label="x1 (예시)", scale=1)
+                            gr.Number(value=300, label="y1 (예시)", scale=1)
+                            gr.Number(value=800, label="x2 (예시)", scale=1)
+                            gr.Number(value=300, label="y2 (예시)", scale=1)
                 with gr.Tab("도시 공간 분석", id=2):
                     gr.Markdown(
                         "밀도 열지도와 존별 체류시간·점유율 등 도시 공간 분석 기능입니다. "
                         "**존 정의** — 직사각형 분석 영역을 정의합니다. 좌상단(x1, y1)과 우하단(x2, y2) "
                         "픽셀 좌표를 입력하세요. **OD 행렬** — 활성화한 존들 사이의 이동(예: Zone A → Zone B)을 "
                         "집계합니다. 최소 2개 이상의 존을 활성화해야 결과가 나오며, '도시 분석 활성화'와는 "
-                        "무관하게 독립적으로 동작합니다.",
+                        "무관하게 독립적으로 동작합니다. 아래는 실제 '도시 공간 분석' 설정 화면입니다.",
                         elem_classes="note",
                     )
+                    _guide_img("02_urban.png")
+                    gr.Markdown("**직접 눌러보세요** (예시 — 실제 설정에는 적용되지 않습니다)",
+                               elem_classes="note")
+                    with gr.Group():
+                        gr.Checkbox(label="밀도 열지도 생성 (예시)", value=True)
+                        gr.CheckboxGroup(
+                            choices=["person", "car", "bicycle", "motorcycle"],
+                            value=["person"], label="열지도 대상 클래스 (예시)",
+                        )
                 with gr.Tab("캘리브레이션", id=3):
                     gr.Markdown(
                         "픽셀→실세계 거리 변환 방식을 선택합니다. '기준거리' 선택 시 교통 분석에 입력한 "
-                        "실거리·픽셀거리로 m/px를 자동 계산합니다.",
+                        "실거리·픽셀거리로 m/px를 자동 계산합니다. 아래는 실제 '캘리브레이션' 설정 화면입니다.",
                         elem_classes="note",
                     )
+                    _guide_img("03_calibration.png")
+                    gr.Markdown("**직접 눌러보세요** (예시 — 실제 설정에는 적용되지 않습니다)",
+                               elem_classes="note")
+                    gr.Radio(choices=["없음", "기준거리"], value="없음",
+                            label="캘리브레이션 모드 (예시)")
                 with gr.Tab("내보내기", id=4):
                     gr.Markdown(
                         "처리 결과를 저장할 형식을 선택합니다. CSV는 기본, Excel과 차트는 추가 분석용 "
                         "보고서를 생성합니다. 결과 화면 하단의 '내보내기' 섹션에서 각 파일을 내려받을 수 "
-                        "있습니다.",
+                        "있습니다. 아래는 실제 '내보내기' 설정 화면입니다.",
                         elem_classes="note",
                     )
+                    _guide_img("04_export.png")
+                    gr.Markdown("**직접 눌러보세요** (예시 — 실제 설정에는 적용되지 않습니다)",
+                               elem_classes="note")
+                    gr.Radio(choices=["CSV만", "CSV + Excel", "CSV + Excel + 차트"],
+                            value="CSV만", label="내보내기 형식 (예시)")
                 with gr.Tab("세션", id=5):
                     gr.Markdown(
-                        "분석 설정을 JSON으로 저장·불러와 실험을 재현합니다. 연구자 메모도 함께 기록됩니다.",
+                        "분석 설정을 JSON으로 저장·불러와 실험을 재현합니다. 연구자 메모도 함께 기록됩니다. "
+                        "아래는 실제 '세션' 설정 화면입니다 — 메모를 적어두면 세션 파일과 함께 저장됩니다.",
                         elem_classes="note",
                     )
+                    _guide_img("05_session.png")
                 with gr.Tab("트랙 요약", id=6):
                     gr.Markdown(
                         "추적된 개별 객체(트랙)별 이동 경로 요약입니다. 진입·퇴장 프레임, 이동 거리, "
-                        "속도를 확인할 수 있습니다.",
+                        "속도를 확인할 수 있습니다. 아래는 결과 화면의 '트랙 요약' 표 예시입니다(영상에서 "
+                        "추적된 트랙이 없으면 빈 표로 표시됩니다).",
                         elem_classes="note",
                     )
+                    _guide_img("06_track_summary.png")
                 with gr.Tab("AI 인사이트", id=7):
                     gr.Markdown(
                         "Claude API 또는 로컬 AI(Ollama)로 분석 결과를 한국어로 해설합니다. "
                         "주목할 데이터는 강조점으로 모아 보여주고(Claude만), 해당 차트·표에도 함께 "
-                        "표시됩니다.",
+                        "표시됩니다. 아래는 실제 'AI 인사이트' 결과 화면입니다.",
                         elem_classes="note",
                     )
+                    _guide_img("07_ai_insight.png")
+                    gr.Markdown("**직접 눌러보세요** (예시 — 실제로 전환되지 않습니다)",
+                               elem_classes="note")
+                    gr.Radio(choices=["Claude API", "로컬 (Ollama)"], value="Claude API",
+                            label="AI 제공자 (예시)")
                 with gr.Tab("배치 처리", id=8):
                     gr.Markdown(
                         "여러 영상을 한 번에 처리할 수 있습니다(홈 화면의 '배치 처리' 탭). 배치로 처리한 "
                         "경우, 결과 화면 상단에서 영상을 골라 이 페이지 전체(차트·표·AI 인사이트)를 그 "
                         "영상 기준으로 바꿔 볼 수 있습니다. 기본값은 마지막으로 처리된 영상입니다. 영상별 "
                         "처리 결과 요약과 전체 결과 ZIP 다운로드는 결과 화면의 '배치 처리 결과' 섹션에서 "
-                        "확인할 수 있습니다.",
+                        "확인할 수 있습니다. 아래는 홈 화면의 '배치 처리' 업로드 탭입니다.",
                         elem_classes="note",
                     )
+                    _guide_img("08_batch_upload.png")
             guide_close_btn = gr.Button("닫기")
 
     # ── Flatten widget lists ──────────────────────────────────────────────

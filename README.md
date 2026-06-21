@@ -1456,6 +1456,54 @@ new_analysis_btn.click(
   - `visible=False`로 시작하는 최상위 컴포넌트(이번의 4개 컨테이너)는 페이지 첫 로드 시 DOM에 아예 마운트되지 않다가, 그 컴포넌트를 대상으로 한 첫 `gr.update`가 도착해야 비로소 마운트됨 — `document.querySelector`로 즉시 존재 여부를 확인하는 디버깅 스크립트는 최소 한 번 상호작용이 일어난 뒤에 검사해야 함(아니면 "컴포넌트가 안 만들어졌다"는 잘못된 결론을 내리기 쉬움).
 - **파일**: `app.py`
 
+### 22. 세부설정 모달 내부 요소가 찌그러짐 + 사용법 가이드 내용이 텍스트뿐이라 부실함
+
+- **증상 1**: "세부설정" 모달을 열면 일부 위젯(노트 텍스트, YOLO 모델을 포함한 `gr.Group` 전체)이 1px 안팎으로 짜부러지고, 그 안의 슬라이더·라디오는 가로 스크롤이 생긴 얇은 막대로만 보임. "연구자 메모" 텍스트박스와 "세션 불러오기" 드롭존이 겹쳐서 깨짐.
+- **원인**: `#settings-panel`(20번 항목에서 추가)은 `max-height: 86vh; overflow-y: auto;`인 **flex column**인데, Gradio가 노트 마크다운·`gr.Group`·접힌 아코디언 같은 자식 블록 다수에 기본적으로 `overflow: auto`를 붙여둠. CSS Flexbox 스펙상 "overflow가 visible이 아닌 flex item은 자동 최소 크기(automatic minimum size)가 0이 된다" — 즉 패널에 모든 자식이 들어갈 공간이 없으면, `overflow:auto`가 걸린 자식들은 보호받지 못하고 거의 0까지 짜부러지고, `overflow:visible`인 형제(섹션 헤더 등)만 자기 크기를 유지함. 결과적으로 **패널 자체가 커지면서 스크롤되는 게 아니라, 안의 위젯들이 찌그러지는** 잘못된 레이아웃이 됨.
+- **해결**: 패널 자식들의 `overflow`를 강제로 `visible`로 되돌려, 이 flexbox 함정의 트리거 자체를 제거(`app.py` CSS, `#settings-panel`/`#guide-panel` 규칙 바로 아래):
+  ```css
+  #settings-panel, #guide-panel {
+      /* ...max-height: 86vh; overflow-y: auto; 등 기존 규칙 그대로... */
+  }
+  /* Gradio가 note Markdown/Group/접힌 Accordion 등 자식 블록에 기본으로 붙이는
+     overflow:auto가, 패널 자신도 스크롤 가능한 flex column일 때 flexbox의
+     "automatic minimum size" 규칙(overflow != visible인 flex item은 min-height가
+     0이 됨)을 발동시켜 0px 근처로 찌그러뜨림. 패널 내부에는 자체 스크롤이 필요한
+     요소가 없으므로, 후손 전체를 visible로 되돌려 이 트리거를 없앤다. */
+  #settings-panel *, #guide-panel * {
+      overflow: visible !important;
+  }
+  ```
+  이걸로 패널 내부의 모든 위젯이 자기 크기 그대로 렌더링되고, 그 결과 패널의 `scrollHeight`(774px 제한을 넘는 약 2133px까지 확인)가 `clientHeight`(774px)보다 커져 **패널 자체에 정상적인 세로 스크롤바**가 생김(요청한 "팝업창 자체에서 스크롤 가능하게"가 충족됨).
+- **증상 2(별개 요청)**: 사용법 가이드 각 페이지가 텍스트 설명만 있고, 어떤 화면을 말하는 건지 그림이 없어 빈 공간만 길었음(2번째 스크린샷 참고).
+- **해결**: 9개 가이드 탭 전부에 (a) 실제 해당 설정/결과 화면을 Playwright로 캡처한 스크린샷을 `gr.Image`로 삽입하고, (b) 가능한 탭(기본 설정/교통 분석/도시 공간 분석/캘리브레이션/내보내기/AI 인사이트)에는 실제 컨트롤과 동일한 라벨·기본값을 가진 **조작 가능하지만 어디에도 연결되지 않은 "예시" 위젯**을 추가해 직접 눌러볼 수 있게 했고, (c) 설명 문구에 "아래는 실제 '○○' 화면입니다" 같은 참조 문장을 덧붙임.
+  - 스크린샷 9장은 `assets/guide/00_basic_settings.png` ~ `08_batch_upload.png`로 저장(레포 루트에 새 `assets/guide/` 폴더). `.gitignore`가 `*.png`를 전부 무시하고 있어서 `!assets/guide/*.png` 예외 규칙을 `*.png` 바로 아래 줄에 추가해야 커밋됨.
+  - 이미지는 `app.py` 상단에 `GUIDE_IMG_DIR = Path(__file__).parent / "assets" / "guide"` 상수를 추가하고, 가이드 모달 안에 작은 헬퍼 `_guide_img(filename)`(=`gr.Image(value=str(GUIDE_IMG_DIR/filename), show_label=False, container=True, interactive=False, buttons=["fullscreen"])`)로 일관되게 삽입.
+  - "예시" 위젯은 기존 실제 컨트롤을 그대로 복제하되 어떤 `outputs=[...]`에도 연결하지 않음 — 예를 들어 "교통 분석" 탭:
+    ```python
+    with gr.Tab("교통 분석", id=1):
+        gr.Markdown("...", elem_classes="note")
+        _guide_img("01_traffic.png")
+        gr.Markdown("**직접 눌러보세요** (예시 — 실제 설정에는 적용되지 않습니다)", elem_classes="note")
+        with gr.Group():
+            with gr.Row():
+                gr.Checkbox(label="Line 1 활성화 (예시)", value=True, scale=1)
+                gr.Textbox(value="Line 1", label="이름 (예시)", scale=2)
+            with gr.Row():
+                gr.Number(value=100, label="x1 (예시)", scale=1)
+                gr.Number(value=300, label="y1 (예시)", scale=1)
+                gr.Number(value=800, label="x2 (예시)", scale=1)
+                gr.Number(value=300, label="y2 (예시)", scale=1)
+    ```
+    이 컴포넌트들은 변수에 담아두지 않고(어차피 어떤 이벤트에도 안 쓰임) `with gr.Group():` 블록 안에 바로 생성만 함. 라벨에 "(예시)"를 붙여 실제 설정과 혼동되지 않게 함.
+  - 트랙 요약(id=6)·세션(id=5)·배치 처리(id=8)는 입력 컨트롤보다 결과/드롭존 자체가 설명이라 이미지만 추가(예시 위젯 생략).
+- **검증**: Playwright로 (1) `#settings-panel`/`#guide-panel`의 `scrollHeight > clientHeight`이고 실제로 `scrollTop`을 끝까지 옮기면 마지막 위젯("완료" 버튼)까지 보이는지 확인, (2) 각 가이드 탭을 열어 이미지가 실제로 로드되고 "예시" 위젯이 라벨과 함께 보이는지 스크린샷으로 확인, (3) 결과 화면의 "?" 버튼(예: AI 인사이트 옆)을 눌러 해당 가이드 탭(이미지+예시 라디오 포함)으로 정확히 이동하는지 확인 — 8-3번(20번 항목)에서 고친 모달 열기/닫기 동작과 충돌 없음을 재확인.
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - 이 "automatic minimum size" flexbox 규칙은 **부모가 실제로 공간이 부족할 때만** 발동함 — 콘텐츠가 패널보다 작을 때는 증상이 안 보이므로, 모달에 위젯을 추가해 콘텐츠가 `max-height`를 넘기기 전까지는 버그가 숨어 있다가 나중에 터질 수 있음. 모달/팝업 패널에 `overflow-y:auto`를 쓸 때는 처음부터 자식 `overflow`를 `visible`로 리셋해두는 게 안전함.
+  - `*.png`가 `.gitignore`에 있는 프로젝트에서 의도적으로 이미지를 커밋해야 한다면, `*.png` 규칙보다 **아래 줄**에 `!경로/*.png` 예외를 추가해야 함(Git은 같은 패턴이라도 나중에 나온 규칙을 우선 적용하지만, 더 구체적인 예외는 순서와 무관하게 동작하는 디렉터리 규칙과 섞이면 헷갈리기 쉬우므로 `git status`/`git add -n`으로 실제로 추적되는지 항상 확인할 것).
+  - "예시" 위젯을 실제 위젯과 똑같은 변수명으로 만들면 안 됨(이미 `yolo_model`, `enable_traffic` 등으로 다른 곳에서 쓰고 있음) — 가이드의 예시 위젯은 아예 변수에 대입하지 않거나, 대입하더라도 `run_btn.click`/`restore_session` 등 기존 `inputs=[...]`/`outputs=[...]` 목록에 절대 추가하지 말 것(추가하면 파라미터 개수가 틀어져 전체가 깨짐).
+- **파일**: `app.py`, `assets/guide/*.png`(신규), `.gitignore`
+
 ---
 
 ## 라이선스

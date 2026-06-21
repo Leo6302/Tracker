@@ -7,6 +7,7 @@ outputs/
 *.avi
 *.csv
 *.png
+!assets/guide/*.png
 .gradio/
 tmp/
 temp/
