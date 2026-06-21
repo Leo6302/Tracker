@@ -1220,9 +1220,30 @@ fig.update_layout(title='Speed Distribution by Class (km/h)',
                   yaxis_title='Mean Speed per Vehicle (km/h)', template='plotly_white')
 ```
 - **주의 (재현 시 흔히 빠지는 함정)**:
-  - 같은 "프레임 전체 풀링" 패턴이 `src/analysis/speed_estimator.py`의 `finalize()`(Excel "Speed Statistics" 시트의 mean/std/percentile)에도 동일하게 존재함 — 이번 수정은 차트(`_speed_box`)만 대상으로 했고 통계 시트는 그대로 두었음. 필요하면 같은 방식(트랙당 1개 값)으로 맞춰야 일관성이 생김.
+  - 같은 "프레임 전체 풀링" 패턴이 `src/analysis/speed_estimator.py`의 `finalize()`(Excel "Speed Statistics" 시트의 mean/std/percentile)에도 동일하게 존재했음 — [19]에서 같은 방식으로 수정함.
   - 박스플롯의 "이상치"는 통계적으로 드문 사건이 아니라, 샘플링 단위(프레임 vs 차량)를 잘못 잡았을 때도 대량으로 발생할 수 있음 — 이상치 비율이 비정상적으로 높다면(수% 이상) 우선 "표본 하나가 무엇을 대표하는가"부터 의심할 것.
 - **파일**: `src/visualization/stats_exporter.py`
+
+### 19. 엑셀 "Speed Statistics" 시트도 같은 프레임 풀링 왜곡을 갖고 있었음
+
+- **증상**: 18번과 별개로, Excel 내보내기의 "Speed Statistics" 시트(`per_class`의 mean/std/p15/p50/p85/p95/max)도 표준편차가 평균보다 크게 나오는 등 비정상적으로 편향된 값을 보임. P85는 도로교통 분야 표준 지표(85th percentile speed, 시트 작성 시 강조 표시되는 컬럼)인데, 실제로는 "차량별" 속도가 아니라 "프레임별" 순간속도의 85번째 백분위수를 계산하고 있어 의미가 달라짐.
+- **원인**: `SpeedEstimator.finalize()`(`src/analysis/speed_estimator.py`)가 18번과 동일한 패턴 — 트랙별 모든 프레임 속도를 `by_class[cls].extend(speeds)`로 그대로 풀링한 뒤 mean/std/percentile을 계산함. `count` 필드도 사실은 "프레임 샘플 수"였지 "차량 수"가 아니었음(예: car 16,185 = 프레임 수, 실제 차량 수는 그보다 훨씬 적음). `ai_insight.py`의 `_summarize_speed()`가 이 `per_class`를 그대로 LLM에 넘기므로, AI 인사이트 문장도 왜곡된 통계를 근거로 생성될 수 있었음. 같은 파일의 `_summarize_track_summary()`는 이미 트랙당 `mean_speed_kmh` 하나를 쓰고 있어 일관성이 없었음.
+- **검증**: 합성 데이터(트랙당 정차 프레임 다수 + 주행 프레임 소수, 트랙 50개)로 수정 후 `finalize()`를 호출 — `count=50`(트랙 수)과 일치하고, std(1.9)가 mean(5.6)보다 작아져 정상적인 분포로 돌아옴을 확인.
+- **해결**: 18번과 동일하게, 트랙별 평균 속도 1개를 대표값으로 모아서 통계를 계산하도록 변경:
+
+```python
+# src/analysis/speed_estimator.py — SpeedEstimator.finalize()
+by_class = defaultdict(list)
+for tid, speeds in self.track_speeds.items():
+    if not speeds:
+        continue
+    cls = self.track_cls.get(tid, 'unknown')
+    by_class[cls].append(float(np.mean(speeds)))  # 프레임 전체 대신 트랙당 평균 1개
+```
+- **주의 (재현 시 흔히 빠지는 함정)**:
+  - 이 변경으로 `per_class[cls]['count']`의 의미가 "프레임 샘플 수"에서 "해당 클래스 차량 수"로 바뀜 — 더 올바른 의미지만, 이전에 생성된 엑셀 결과와 숫자를 직접 비교하면 줄어든 것처럼 보일 수 있으니 영상을 재처리한 뒤 비교할 것.
+  - `track_speeds`/`track_cls`(프레임 단위 원시 데이터)는 반환값에 그대로 남아있음 — 새로 집계 코드를 추가할 때 또 같은 실수(프레임 그대로 풀링)를 반복하지 않도록 주의.
+- **파일**: `src/analysis/speed_estimator.py`
 
 ---
 

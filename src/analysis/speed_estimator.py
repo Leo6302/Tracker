@@ -35,10 +35,15 @@ class SpeedEstimator:
             self._prev_frame[tid] = frame_idx
 
     def finalize(self):
+        # One representative speed per vehicle (its mean), not per frame —
+        # pooling raw per-frame samples lets idling/decelerating frames
+        # outnumber cruising frames and skews mean/std/percentiles per class.
         by_class = defaultdict(list)
         for tid, speeds in self.track_speeds.items():
+            if not speeds:
+                continue
             cls = self.track_cls.get(tid, 'unknown')
-            by_class[cls].extend(speeds)
+            by_class[cls].append(float(np.mean(speeds)))
 
         per_class = {}
         for cls, speeds in by_class.items():
